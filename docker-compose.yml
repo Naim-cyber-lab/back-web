@@ -6,9 +6,6 @@ services:
       - .:/code
     working_dir: /code
     environment:
-      ELASTICSEARCH_URL: http://192.168.1.213:9200
-      ELASTICSEARCH_USERNAME: elastic
-      ELASTICSEARCH_PASSWORD: changeme
       DATABASE_URL: postgresql://myuser:mypassword@192.168.1.208:5432/mydatabase
     ports:
       - "8000:8000"
