@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from jose import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
@@ -122,10 +122,9 @@ def login(body: LoginIn, conn: Connection = Depends(conn_dep)):
     return AuthOut(access_token=token)
 
 @router.get("/me", response_model=MeOut)
-def me(authorization: str | None = None, conn: Connection = Depends(conn_dep)):
+def me(authorization: str | None = Header(None), conn: Connection = Depends(conn_dep)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Non authentifié")
-
     token = authorization.split(" ", 1)[1]
     payload = decode_token(token)
 
