@@ -118,13 +118,13 @@ def login(body: LoginIn, conn: Connection = Depends(conn_dep)):
         if not row:
             raise HTTPException(status_code=401, detail="Identifiants invalides")
 
-        user_id, email, password_hash = row
+        user_id, email, password = row
 
     if not row:
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
-    user_id, email, password_hash, role = row
-    if not password_hash or not pwd.verify(body.password, password_hash):
+    user_id, email, password, role = row
+    if not password or not pwd.verify(body.password, password):
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
     token = make_access_token(sub=email, user_id=user_id, role=role or "user")
