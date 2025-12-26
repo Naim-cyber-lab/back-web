@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from .core.es import init_indices
 from .api.v1.api import api_router
 
 app = FastAPI(
@@ -9,6 +8,6 @@ app = FastAPI(
 
 @app.on_event("startup")
 def startup():
-    init_indices()
+    pass
 
 app.include_router(api_router, prefix="/api/v1")
