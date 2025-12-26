@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from jose import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
@@ -18,12 +18,9 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 JWT_ALG = os.getenv("JWT_ALG", "HS256")
 ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "60"))
 
-USER_TABLE = os.getenv("DJANGO_USER_TABLE", "profil_winker")  # adapte si besoin
+USER_TABLE = os.getenv("DJANGO_USER_TABLE", "profil_winker")
 USER_EMAIL_COL = os.getenv("DJANGO_USER_EMAIL_COL", "email")
-USER_PWD_COL = os.getenv("DJANGO_USER_PWD_COL", "password")  # ex: password_hash
-USER_ROLE_COL = os.getenv("DJANGO_USER_ROLE_COL", "role")        # ex: role
-
-from passlib.context import CryptContext
+USER_PWD_COL = os.getenv("DJANGO_USER_PWD_COL", "password")
 
 pwd = CryptContext(
     schemes=[
@@ -43,7 +40,6 @@ class SignupIn(BaseModel):
     email: EmailStr
     password: str
     name: Optional[str] = None
-    role: str = "user"  # "pro" ou "user"
 
 class LoginIn(BaseModel):
     email: EmailStr
@@ -88,7 +84,6 @@ def signup(body: SignupIn, conn: Connection = Depends(conn_dep)):
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="Email déjà utilisé")
 
-            # adapte les colonnes si ta table a d'autres noms
             cur.execute(
                 f"""
                 INSERT INTO {USER_TABLE} ("{USER_EMAIL_COL}", "{USER_PWD_COL}")
@@ -99,7 +94,7 @@ def signup(body: SignupIn, conn: Connection = Depends(conn_dep)):
             )
             user_id = cur.fetchone()[0]
 
-    token = make_access_token(sub=body.email, user_id=user_id, role=body.role)
+    token = make_access_token(sub=body.email, user_id=user_id, role="user")
     return AuthOut(access_token=token)
 
 @router.post("/login", response_model=AuthOut)
@@ -115,33 +110,31 @@ def login(body: LoginIn, conn: Connection = Depends(conn_dep)):
         )
         row = cur.fetchone()
 
-        if not row:
-            raise HTTPException(status_code=401, detail="Identifiants invalides")
-
-        user_id, email, password = row
-
     if not row:
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
-    user_id, email, password, role = row
-    if not password or not pwd.verify(body.password, password):
+    user_id, email, password_hash = row
+
+    if not password_hash or not pwd.verify(body.password, password_hash):
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
-    token = make_access_token(sub=email, user_id=user_id, role=role or "user")
+    token = make_access_token(sub=email, user_id=user_id, role="user")
     return AuthOut(access_token=token)
 
 @router.get("/me", response_model=MeOut)
 def me(authorization: str | None = None, conn: Connection = Depends(conn_dep)):
-    # attend "Authorization: Bearer <token>"
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Non authentifié")
+
     token = authorization.split(" ", 1)[1]
     payload = decode_token(token)
 
     uid = int(payload["uid"])
+    role = payload.get("role", "user")
+
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, "{USER_EMAIL_COL}", "{USER_ROLE_COL}" FROM {USER_TABLE} WHERE id=%(id)s""",
+            f"""SELECT id, "{USER_EMAIL_COL}" FROM {USER_TABLE} WHERE id=%(id)s""",
             {"id": uid},
         )
         row = cur.fetchone()
@@ -149,5 +142,5 @@ def me(authorization: str | None = None, conn: Connection = Depends(conn_dep)):
     if not row:
         raise HTTPException(status_code=401, detail="Utilisateur introuvable")
 
-    user_id, email, role = row
-    return MeOut(id=user_id, email=email, role=role or "user", name=None)
+    user_id, email = row
+    return MeOut(id=user_id, email=email, role=role, name=None)
