@@ -23,7 +23,17 @@ USER_EMAIL_COL = os.getenv("DJANGO_USER_EMAIL_COL", "email")
 USER_PWD_COL = os.getenv("DJANGO_USER_PWD_COL", "password_hash")  # ex: password_hash
 USER_ROLE_COL = os.getenv("DJANGO_USER_ROLE_COL", "role")        # ex: role
 
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from passlib.context import CryptContext
+
+pwd = CryptContext(
+    schemes=[
+        "django_pbkdf2_sha256",
+        "django_pbkdf2_sha1",
+        "django_argon2",
+        "bcrypt",
+    ],
+    deprecated="auto",
+)
 
 def conn_dep() -> Connection:
     return get_conn()
@@ -67,7 +77,7 @@ def signup(body: SignupIn, conn: Connection = Depends(conn_dep)):
     if len(body.password) < 6:
         raise HTTPException(status_code=400, detail="Mot de passe trop court")
 
-    password_hash = pwd.hash(body.password)
+    password_hash = pwd.hash(body.password, scheme="django_pbkdf2_sha256")
 
     with conn:
         with conn.cursor() as cur:
