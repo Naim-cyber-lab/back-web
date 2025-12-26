@@ -4,3 +4,4 @@ python-dotenv
 sqlalchemy
 psycopg[binary]
 python-multipart
+jose
