@@ -20,7 +20,7 @@ ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "60"))
 
 USER_TABLE = os.getenv("DJANGO_USER_TABLE", "profil_winker")  # adapte si besoin
 USER_EMAIL_COL = os.getenv("DJANGO_USER_EMAIL_COL", "email")
-USER_PWD_COL = os.getenv("DJANGO_USER_PWD_COL", "password_hash")  # ex: password_hash
+USER_PWD_COL = os.getenv("DJANGO_USER_PWD_COL", "password")  # ex: password_hash
 USER_ROLE_COL = os.getenv("DJANGO_USER_ROLE_COL", "role")        # ex: role
 
 from passlib.context import CryptContext
@@ -91,11 +91,11 @@ def signup(body: SignupIn, conn: Connection = Depends(conn_dep)):
             # adapte les colonnes si ta table a d'autres noms
             cur.execute(
                 f"""
-                INSERT INTO {USER_TABLE} ("{USER_EMAIL_COL}", "{USER_PWD_COL}", "{USER_ROLE_COL}")
-                VALUES (%(email)s, %(pwd)s, %(role)s)
+                INSERT INTO {USER_TABLE} ("{USER_EMAIL_COL}", "{USER_PWD_COL}")
+                VALUES (%(email)s, %(pwd)s)
                 RETURNING id
                 """,
-                {"email": body.email, "pwd": password_hash, "role": body.role},
+                {"email": body.email, "pwd": password_hash},
             )
             user_id = cur.fetchone()[0]
 
@@ -107,13 +107,18 @@ def login(body: LoginIn, conn: Connection = Depends(conn_dep)):
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT id, "{USER_EMAIL_COL}", "{USER_PWD_COL}", "{USER_ROLE_COL}"
+            SELECT id, "{USER_EMAIL_COL}", "{USER_PWD_COL}"
             FROM {USER_TABLE}
             WHERE "{USER_EMAIL_COL}"=%(email)s
             """,
             {"email": body.email},
         )
         row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=401, detail="Identifiants invalides")
+
+        user_id, email, password_hash = row
 
     if not row:
         raise HTTPException(status_code=401, detail="Identifiants invalides")
