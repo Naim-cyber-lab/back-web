@@ -2,10 +2,26 @@ services:
   api:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-      - .:/code
+
     working_dir: /code
+
     environment:
       DATABASE_URL: postgresql://myuser:mypassword@192.168.1.208:5432/mydatabase
+
+      # ✅ IMPORTANT : FastAPI écrira les vidéos ici
+      MEDIA_ROOT: /mnt/data
+      EVENT_UPLOAD_DIR: events
+
+      # optionnel (si tu veux expliciter les tables)
+      # DJANGO_EVENT_TABLE: profil_event
+      # DJANGO_FILESEVENT_TABLE: profil_filesevent
+
+    volumes:
+      # ton code comme avant
+      - .:/code
+
+      # ✅ le mount path LXC (doit exister dans le CT)
+      - /mnt/data:/mnt/data
+
     ports:
       - "8000:8000"
