@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from .api.v1.api import api_router
 
 app = FastAPI(
-    title="NISU Recommendation Service",
+    title="NISU Web Service",
     version="0.1.0",
 )
 
