@@ -1,7 +1,7 @@
 # app/routers/events.py
 import os
 import uuid
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -73,7 +73,7 @@ def create_event(
     creator_winker_id: int = Form(...),
     titre: str = Form(""),
     titre_fr: Optional[str] = Form(None),
-    date_event: Optional[datetime] = Form(None),  # correspond à dateEvent
+    date_event: Optional[date] = Form(None),  # correspond à dateEvent
     adresse: Optional[str] = Form(None),
     city: Optional[str] = Form(None),
     region: Optional[str] = Form(None),
@@ -125,7 +125,7 @@ def create_event(
                           %(adresse)s, %(city)s, %(region)s, %(subregion)s, %(pays)s, %(code_postal)s,
                           %(bio_event)s, %(lon)s, %(lat)s,
                           1, 10000000, false,
-                          0, 0, 0
+                          0, 0,
                         )
                     RETURNING id
                     """,
