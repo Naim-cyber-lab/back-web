@@ -1,6 +1,5 @@
 from fastapi import APIRouter
-from .endpoints import indexing, recommendations
+from app.api.v1.events import router
 
 api_router = APIRouter()
-api_router.include_router(indexing.router, prefix="/index", tags=["indexing"])
-api_router.include_router(recommendations.router, prefix="/recommendations", tags=["recommendations"])
+api_router.include_router(router, prefix="/events", tags=["events"])
