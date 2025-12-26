@@ -117,7 +117,7 @@ def create_event(
                           "adresse", "city", "region", "subregion", "pays", "codePostal",
                           "bioEvent", "lon", "lat",
                           "currentNbParticipants", "maxNumberParticipant", "isFull",
-                          "active", "nbAlreadyPublished"
+                          "active", "nbAlreadyPublished", "nbStories"
                         )
                     VALUES
                         ( %(creator)s, %(titre)s, %(titre_fr)s,
@@ -125,7 +125,7 @@ def create_event(
                           %(adresse)s, %(city)s, %(region)s, %(subregion)s, %(pays)s, %(code_postal)s,
                           %(bio_event)s, %(lon)s, %(lat)s,
                           1, 10000000, false,
-                          0, 0
+                          0, 0, 0
                         )
                     RETURNING id
                     """,
