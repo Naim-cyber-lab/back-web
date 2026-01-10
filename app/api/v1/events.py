@@ -1,11 +1,14 @@
 # app/routers/events.py
+from __future__ import annotations
+
+import json
 import os
 import uuid
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict, Union
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.sql import SQL, Identifier
@@ -24,11 +27,13 @@ EVENT_UPLOAD_DIR = os.getenv("EVENT_UPLOAD_DIR", "events")
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 
+
 # -------------------------
 # DB dependency
 # -------------------------
 def conn_dep() -> Connection:
     return get_conn()
+
 
 # -------------------------
 # Helpers upload
@@ -36,6 +41,7 @@ def conn_dep() -> Connection:
 def _safe_ext(filename: str) -> str:
     _, ext = os.path.splitext(filename or "")
     return ext.lower().strip()
+
 
 def _save_upload(upload: UploadFile, subdir: str, allowed_ext: set[str]) -> str:
     ext = _safe_ext(upload.filename)
@@ -62,6 +68,7 @@ def _save_upload(upload: UploadFile, subdir: str, allowed_ext: set[str]) -> str:
 
     return rel_path
 
+
 def _delete_file_quiet(rel_path: Optional[str]) -> None:
     if not rel_path:
         return
@@ -72,8 +79,118 @@ def _delete_file_quiet(rel_path: Optional[str]) -> None:
     except Exception:
         pass
 
+
 # -------------------------
-# Models
+# Social list (JSON in TextField)
+# -------------------------
+class SocialVideo(BaseModel):
+    url: str
+    approved: Optional[bool] = None  # None = pas encore tranché
+
+
+def _parse_social_list(raw: Optional[str]) -> List[SocialVideo]:
+    """
+    DB raw is a textfield.
+    Accept:
+      - None / "" -> []
+      - JSON list[str] -> [{url, approved=None}, ...]
+      - JSON list[{url, approved?}] -> normalized
+      - "https://..." -> single URL
+    """
+    if not raw:
+        return []
+
+    s = str(raw).strip()
+    if not s:
+        return []
+
+    # try JSON
+    try:
+        data = json.loads(s)
+        if isinstance(data, list):
+            out: List[SocialVideo] = []
+            for item in data:
+                if isinstance(item, str):
+                    u = item.strip()
+                    if u:
+                        out.append(SocialVideo(url=u, approved=None))
+                elif isinstance(item, dict):
+                    u = str(item.get("url", "")).strip()
+                    if not u:
+                        continue
+                    approved = item.get("approved", None)
+                    if approved is not None:
+                        approved = bool(approved)
+                    out.append(SocialVideo(url=u, approved=approved))
+            return out
+    except Exception:
+        pass
+
+    # fallback: single URL
+    return [SocialVideo(url=s, approved=None)]
+
+
+def _dump_social_list(videos: List[SocialVideo]) -> Optional[str]:
+    cleaned = []
+    for v in videos:
+        if not v.url or not str(v.url).strip():
+            continue
+        cleaned.append({"url": str(v.url).strip(), "approved": v.approved})
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _normalize_social_patch(value: Any) -> Optional[str]:
+    """
+    Accept PATCH payloads:
+      - None
+      - string JSON
+      - list[str]
+      - list[{url, approved?}]
+    Return normalized JSON string (list of objects) or None.
+    """
+    if value is None:
+        return None
+
+    # already string: json list or url
+    if isinstance(value, str):
+        vids = _parse_social_list(value)
+        return _dump_social_list(vids)
+
+    # list python
+    if isinstance(value, list):
+        out: List[SocialVideo] = []
+        for item in value:
+            if isinstance(item, str):
+                u = item.strip()
+                if u:
+                    out.append(SocialVideo(url=u, approved=None))
+            elif isinstance(item, dict):
+                u = str(item.get("url", "")).strip()
+                if not u:
+                    continue
+                approved = item.get("approved", None)
+                if approved is not None:
+                    approved = bool(approved)
+                out.append(SocialVideo(url=u, approved=approved))
+        return _dump_social_list(out)
+
+    # dict single
+    if isinstance(value, dict):
+        u = str(value.get("url", "")).strip()
+        if not u:
+            return None
+        approved = value.get("approved", None)
+        if approved is not None:
+            approved = bool(approved)
+        return _dump_social_list([SocialVideo(url=u, approved=approved)])
+
+    return None
+
+
+# -------------------------
+# Models API
 # -------------------------
 class EventPublic(BaseModel):
     id: int
@@ -95,22 +212,26 @@ class EventPublic(BaseModel):
     bioEvent: Optional[str] = None
     website: Optional[str] = None
 
-    # champs socials (si tu les as en DB; sinon ils restent None)
-    youtube_short: Optional[str] = None
+    # RAW DB (textfield json)
+    youtube_video: Optional[str] = None
     youtube_query: Optional[str] = None
     tiktok_video: Optional[str] = None
     tiktok_query: Optional[str] = None
     insta_video: Optional[str] = None
     insta_query: Optional[str] = None
 
+    # parsed for frontend
+    youtube_videos: List[SocialVideo] = Field(default_factory=list)
+    tiktok_videos: List[SocialVideo] = Field(default_factory=list)
+    insta_videos: List[SocialVideo] = Field(default_factory=list)
+
     price: Optional[str] = None
 
-    # confirmé (on mappe sur validated_from_web si la colonne existe)
     confirmed: bool = False
 
-    # media Django (profil_filesevent)
     image: Optional[str] = None
     video: Optional[str] = None
+
 
 class EventListResponse(BaseModel):
     items: list[EventPublic]
@@ -118,8 +239,8 @@ class EventListResponse(BaseModel):
     limit: int
     offset: int
 
+
 class EventPatch(BaseModel):
-    # édition depuis le front
     titre: Optional[str] = None
     bioEvent: Optional[str] = None
     adresse: Optional[str] = None
@@ -132,23 +253,27 @@ class EventPatch(BaseModel):
     lon: Optional[float] = None
     website: Optional[str] = None
 
-    youtube_short: Optional[str] = None
+    # socials acceptent string JSON OU liste python
+    youtube_video: Optional[Any] = None
     youtube_query: Optional[str] = None
-    tiktok_video: Optional[str] = None
+    tiktok_video: Optional[Any] = None
     tiktok_query: Optional[str] = None
-    insta_video: Optional[str] = None
+    insta_video: Optional[Any] = None
     insta_query: Optional[str] = None
 
     price: Optional[str] = None
 
+
 class ConfirmBody(BaseModel):
     confirmed: bool
+
 
 class EventCreateResponse(BaseModel):
     event_id: int
     files_event_id: int
     video_path: str
     image_path: Optional[str] = None
+
 
 # -------------------------
 # Introspection util
@@ -165,11 +290,61 @@ def _get_columns(conn: Connection) -> set[str]:
         )
         return {r["column_name"] for r in cur.fetchall()}
 
+
 def _col_exists(cols: set[str], col: str) -> bool:
     return col in cols
 
+
+def _sel(cols: set[str], colname: str) -> SQL:
+    return Identifier(colname) if _col_exists(cols, colname) else SQL("NULL")
+
+
+def _confirmed_expr(cols: set[str]) -> SQL:
+    return (
+        SQL("COALESCE(e.validated_from_web, false)") if _col_exists(cols, "validated_from_web")
+        else SQL("COALESCE(e.active, 0) = 1")
+    )
+
+
+def _row_to_event(r: Dict[str, Any]) -> EventPublic:
+    yt_raw = r.get("youtube_video")
+    tt_raw = r.get("tiktok_video")
+    ig_raw = r.get("insta_video")
+    return EventPublic(
+        id=r["id"],
+        titre=r.get("titre"),
+        titre_fr=r.get("titre_fr"),
+        adresse=r.get("adresse"),
+        city=r.get("city"),
+        codePostal=r.get("codePostal"),
+        region=r.get("region"),
+        subregion=r.get("subregion"),
+        pays=r.get("pays"),
+        lat=r.get("lat"),
+        lon=r.get("lon"),
+        bioEvent=r.get("bioEvent"),
+        website=r.get("website"),
+
+        youtube_video=yt_raw,
+        youtube_query=r.get("youtube_query"),
+        tiktok_video=tt_raw,
+        tiktok_query=r.get("tiktok_query"),
+        insta_video=ig_raw,
+        insta_query=r.get("insta_query"),
+
+        youtube_videos=_parse_social_list(yt_raw),
+        tiktok_videos=_parse_social_list(tt_raw),
+        insta_videos=_parse_social_list(ig_raw),
+
+        price=r.get("price"),
+        confirmed=bool(r.get("confirmed") or False),
+        image=r.get("image"),
+        video=r.get("video"),
+    )
+
+
 # -------------------------
-# Create (upload) - conservé + durci
+# Create (upload)
 # -------------------------
 @router.post("", response_model=EventCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_event(
@@ -201,28 +376,25 @@ def create_event(
     try:
         cols = _get_columns(conn)
 
-        # not-null defaults
+        today = date.today()
+
+        # defaults
         nbStories_default = 0
         nbAlreadyPublished_default = 0
         active_default = 0
         currentNbParticipants_default = 1
         maxNumberParticipant_default = 10000000
         isFull_default = False
-
         validated_default = False
-
-        today = date.today()
 
         with conn:
             with conn.cursor() as cur:
-                # Build insert safely depending on real columns present
                 insert_cols = [
                     "creatorWinker_id", "titre", "titre_fr",
                     "dateEvent", "datePublication",
                     "adresse", "city", "region", "subregion", "pays", "codePostal",
                     "bioEvent", "lon", "lat",
                 ]
-
                 values = [
                     creator_winker_id, titre or "", titre_fr,
                     date_event, today,
@@ -230,7 +402,6 @@ def create_event(
                     bio_event, lon, lat,
                 ]
 
-                # add default columns if they exist
                 def add_if_exists(c: str, v: Any):
                     nonlocal insert_cols, values
                     if _col_exists(cols, c):
@@ -271,6 +442,7 @@ def create_event(
         _delete_file_quiet(image_path)
         raise HTTPException(status_code=500, detail=f"Erreur création event: {e}")
 
+
 # -------------------------
 # Read - list
 # -------------------------
@@ -282,16 +454,6 @@ def list_events(
     conn: Connection = Depends(conn_dep),
 ):
     cols = _get_columns(conn)
-
-    # map "confirmed" => validated_from_web if exists else active
-    confirmed_expr = (
-        SQL("COALESCE(e.validated_from_web, false)") if _col_exists(cols, "validated_from_web")
-        else SQL("COALESCE(e.active, 0) = 1")
-    )
-
-    # optional columns
-    def sel(colname: str) -> SQL:
-        return Identifier(colname) if _col_exists(cols, colname) else SQL("NULL")
 
     where = SQL("TRUE")
     params: list[Any] = []
@@ -319,12 +481,16 @@ def list_events(
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
-                  {youtube_short} as youtube_short,
+
+                  {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
+
                   {tiktok_video} as tiktok_video,
                   {tiktok_query} as tiktok_query,
+
                   {insta_video} as insta_video,
                   {insta_query} as insta_query,
+
                   {price} as price,
                   {confirmed} as confirmed,
                   f.image as image,
@@ -337,14 +503,15 @@ def list_events(
             .format(
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
-                confirmed=confirmed_expr,
-                youtube_short=sel("youtube_short"),
-                youtube_query=sel("youtube_query"),
-                tiktok_video=sel("tiktok_video"),
-                tiktok_query=sel("tiktok_query"),
-                insta_video=sel("insta_video"),
-                insta_query=sel("insta_query"),
-                price=sel("price"),
+                confirmed=_confirmed_expr(cols),
+
+                youtube_video=_sel(cols, "youtube_video"),
+                youtube_query=_sel(cols, "youtube_query"),
+                tiktok_video=_sel(cols, "tiktok_video"),
+                tiktok_query=_sel(cols, "tiktok_query"),
+                insta_video=_sel(cols, "insta_video"),
+                insta_query=_sel(cols, "insta_query"),
+                price=_sel(cols, "price"),
             )
             + where
             + SQL(" ORDER BY e.id DESC LIMIT %s OFFSET %s")
@@ -353,54 +520,16 @@ def list_events(
         cur.execute(query, params + [limit, offset])
         rows = cur.fetchall()
 
-    items = []
-    for r in rows:
-        items.append(
-            EventPublic(
-                id=r["id"],
-                titre=r.get("titre"),
-                titre_fr=r.get("titre_fr"),
-                adresse=r.get("adresse"),
-                city=r.get("city"),
-                codePostal=r.get("codePostal"),
-                region=r.get("region"),
-                subregion=r.get("subregion"),
-                pays=r.get("pays"),
-                lat=r.get("lat"),
-                lon=r.get("lon"),
-                bioEvent=r.get("bioEvent"),
-                website=r.get("website"),
-                youtube_short=r.get("youtube_short"),
-                youtube_query=r.get("youtube_query"),
-                tiktok_video=r.get("tiktok_video"),
-                tiktok_query=r.get("tiktok_query"),
-                insta_video=r.get("insta_video"),
-                insta_query=r.get("insta_query"),
-                price=r.get("price"),
-                confirmed=bool(r.get("confirmed") or False),
-                image=r.get("image"),
-                video=r.get("video"),
-            )
-        )
-
+    items = [_row_to_event(r) for r in rows]
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
+
 
 # -------------------------
 # Read - single
 # -------------------------
 @router.get("/{event_id}", response_model=EventPublic)
 def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
-    data = list_events(limit=1, offset=0, q=None, conn=conn)  # not ideal but OK
-    # better: direct query, but we keep simple
-    # We'll fetch by id directly:
     cols = _get_columns(conn)
-    confirmed_expr = (
-        SQL("COALESCE(e.validated_from_web, false)") if _col_exists(cols, "validated_from_web")
-        else SQL("COALESCE(e.active, 0) = 1")
-    )
-
-    def sel(colname: str) -> SQL:
-        return Identifier(colname) if _col_exists(cols, colname) else SQL("NULL")
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -414,12 +543,16 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
-                  {youtube_short} as youtube_short,
+
+                  {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
+
                   {tiktok_video} as tiktok_video,
                   {tiktok_query} as tiktok_query,
+
                   {insta_video} as insta_video,
                   {insta_query} as insta_query,
+
                   {price} as price,
                   {confirmed} as confirmed,
                   f.image as image,
@@ -431,14 +564,15 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
             ).format(
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
-                confirmed=confirmed_expr,
-                youtube_short=sel("youtube_short"),
-                youtube_query=sel("youtube_query"),
-                tiktok_video=sel("tiktok_video"),
-                tiktok_query=sel("tiktok_query"),
-                insta_video=sel("insta_video"),
-                insta_query=sel("insta_query"),
-                price=sel("price"),
+                confirmed=_confirmed_expr(cols),
+
+                youtube_video=_sel(cols, "youtube_video"),
+                youtube_query=_sel(cols, "youtube_query"),
+                tiktok_video=_sel(cols, "tiktok_video"),
+                tiktok_query=_sel(cols, "tiktok_query"),
+                insta_video=_sel(cols, "insta_video"),
+                insta_query=_sel(cols, "insta_query"),
+                price=_sel(cols, "price"),
             ),
             (event_id,),
         )
@@ -447,40 +581,16 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
     if not r:
         raise HTTPException(status_code=404, detail="Event introuvable")
 
-    return EventPublic(
-        id=r["id"],
-        titre=r.get("titre"),
-        titre_fr=r.get("titre_fr"),
-        adresse=r.get("adresse"),
-        city=r.get("city"),
-        codePostal=r.get("codePostal"),
-        region=r.get("region"),
-        subregion=r.get("subregion"),
-        pays=r.get("pays"),
-        lat=r.get("lat"),
-        lon=r.get("lon"),
-        bioEvent=r.get("bioEvent"),
-        website=r.get("website"),
-        youtube_short=r.get("youtube_short"),
-        youtube_query=r.get("youtube_query"),
-        tiktok_video=r.get("tiktok_video"),
-        tiktok_query=r.get("tiktok_query"),
-        insta_video=r.get("insta_video"),
-        insta_query=r.get("insta_query"),
-        price=r.get("price"),
-        confirmed=bool(r.get("confirmed") or False),
-        image=r.get("image"),
-        video=r.get("video"),
-    )
+    return _row_to_event(r)
+
 
 # -------------------------
-# Patch - update fields
+# Patch - update fields + socials list
 # -------------------------
 @router.patch("/{event_id}", response_model=EventPublic)
 def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
-    # allowlist -> map api fields to db columns (exact names)
     mapping: dict[str, str] = {
         "titre": "titre",
         "bioEvent": "bioEvent",
@@ -493,12 +603,14 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "lat": "lat",
         "lon": "lon",
         "website": "website",
-        "youtube_short": "youtube_short",
+
+        "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
         "tiktok_video": "tiktok_video",
         "tiktok_query": "tiktok_query",
         "insta_video": "insta_video",
         "insta_query": "insta_query",
+
         "price": "price",
     }
 
@@ -513,14 +625,21 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         db_col = mapping.get(api_key)
         if not db_col:
             continue
-        # only update if column exists
+
+        # ignore missing columns (except quoted django columns we might still have)
         if db_col not in cols and db_col not in {"bioEvent", "codePostal"}:
             continue
-        # special quoted columns in Django schema
+
+        # normalize socials
+        if db_col in {"youtube_video", "tiktok_video", "insta_video"}:
+            value = _normalize_social_patch(value)
+
+        # quoted columns in Django
         if db_col in {"bioEvent", "codePostal"}:
             sets.append(SQL('"{}" = %s').format(SQL(db_col)))
         else:
             sets.append(SQL("{} = %s").format(Identifier(db_col)))
+
         values.append(value)
 
     if not sets:
@@ -535,6 +654,7 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 
     return get_event(event_id, conn)
 
+
 # -------------------------
 # Confirm endpoint
 # -------------------------
@@ -542,7 +662,6 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
-    # Prefer validated_from_web if present, else active
     if _col_exists(cols, "validated_from_web"):
         q = SQL("UPDATE {} SET validated_from_web = %s WHERE id = %s").format(Identifier(EVENT_TABLE))
         vals = (body.confirmed, event_id)
