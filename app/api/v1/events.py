@@ -24,20 +24,14 @@ router = APIRouter(prefix="/events", tags=["events"])
 # -------------------------
 logger = logging.getLogger(__name__)
 
-# Mets EVENT_LOG_LEVEL=DEBUG si tu veux plus de verbosité.
-# Par défaut, on ne touche pas au global logging config (c'est l'app qui doit le faire),
-# mais on te donne un levier simple par env.
 _EVENT_LOG_LEVEL = os.getenv("EVENT_LOG_LEVEL")
 if _EVENT_LOG_LEVEL:
     try:
         logger.setLevel(_EVENT_LOG_LEVEL.upper())
     except Exception:
-        # si valeur invalide, on ignore
         pass
 
-# Active des logs plus "bruyants" (ex: rows problématiques) si EVENT_DEBUG=1
 EVENT_DEBUG = os.getenv("EVENT_DEBUG", "0") in {"1", "true", "TRUE", "yes", "YES"}
-
 
 # Tables Django (override via env si besoin)
 EVENT_TABLE = os.getenv("DJANGO_EVENT_TABLE", "profil_event")
@@ -106,10 +100,6 @@ def _delete_file_quiet(rel_path: Optional[str]) -> None:
 # JSON-safe numbers (fix NaN/Inf)
 # -------------------------
 def _json_safe_float(v: Any) -> Optional[float]:
-    """
-    JSON strict interdit NaN / Infinity / -Infinity.
-    On renvoie None si non fini.
-    """
     if v is None:
         return None
     try:
@@ -122,31 +112,12 @@ def _json_safe_float(v: Any) -> Optional[float]:
 
 
 def _log_if_float_was_sanitized(event_id: Any, field: str, raw: Any, cleaned: Optional[float]) -> None:
-    """
-    Log un warning si raw était un NaN/Inf (ou valeur non convertible) et a été nettoyé.
-    """
-    # On essaye de détecter "différence" proprement (sans casser si raw est non comparable)
-    try:
-        raw_float = float(raw) if raw is not None else None
-    except Exception:
-        raw_float = None
-
-    # Si raw existe mais cleaned est None -> très probablement NaN/Inf ou truc invalide
     if raw is not None and cleaned is None:
         logger.warning(
             "Event %s: champ %s non JSON-serializable (raw=%r) -> cleaned=None",
             event_id,
             field,
             raw,
-        )
-    # Si raw était convertible et cleaned est un float différent (cas rare), on log en debug
-    elif raw_float is not None and cleaned is not None and raw_float != cleaned and EVENT_DEBUG:
-        logger.debug(
-            "Event %s: champ %s modifié (raw=%r -> cleaned=%r)",
-            event_id,
-            field,
-            raw,
-            cleaned,
         )
 
 
@@ -159,22 +130,12 @@ class SocialVideo(BaseModel):
 
 
 def _parse_social_list(raw: Optional[str]) -> List[SocialVideo]:
-    """
-    DB raw is a textfield.
-    Accept:
-      - None / "" -> []
-      - JSON list[str] -> [{url, approved=None}, ...]
-      - JSON list[{url, approved?}] -> normalized
-      - "https://..." -> single URL
-    """
     if not raw:
         return []
-
     s = str(raw).strip()
     if not s:
         return []
 
-    # try JSON
     try:
         data = json.loads(s)
         if isinstance(data, list):
@@ -197,7 +158,6 @@ def _parse_social_list(raw: Optional[str]) -> List[SocialVideo]:
         if EVENT_DEBUG:
             logger.debug("Social parse failed raw=%r err=%s", raw, e)
 
-    # fallback: single URL
     return [SocialVideo(url=s, approved=None)]
 
 
@@ -213,24 +173,13 @@ def _dump_social_list(videos: List[SocialVideo]) -> Optional[str]:
 
 
 def _normalize_social_patch(value: Any) -> Optional[str]:
-    """
-    Accept PATCH payloads:
-      - None
-      - string JSON
-      - list[str]
-      - list[{url, approved?}]
-      - list[SocialVideo-like]
-    Return: JSON string (or None).
-    """
     if value is None:
         return None
 
-    # already JSON string
     if isinstance(value, str):
         s = value.strip()
         if not s:
             return None
-        # ensure it's valid json list if possible
         try:
             data = json.loads(s)
             if isinstance(data, list):
@@ -250,12 +199,9 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                         out.append(SocialVideo(url=u, approved=approved))
                 return _dump_social_list(out)
         except Exception:
-            # maybe it's a single URL
             return _dump_social_list([SocialVideo(url=s, approved=None)])
-
         return s
 
-    # list payload
     if isinstance(value, list):
         out: List[SocialVideo] = []
         for item in value:
@@ -272,7 +218,6 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                     approved = bool(approved)
                 out.append(SocialVideo(url=u, approved=approved))
             else:
-                # try object with attributes
                 try:
                     u = str(getattr(item, "url", "")).strip()
                     if not u:
@@ -285,7 +230,6 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                     continue
         return _dump_social_list(out)
 
-    # fallback
     try:
         s = str(value).strip()
         if not s:
@@ -318,7 +262,9 @@ class EventPublic(BaseModel):
     bioEvent: Optional[str] = None
     website: Optional[str] = None
 
-    # RAW DB (textfield json)
+    # ✅ avis google (colonne Django avec majuscules)
+    UrlGoogleMapsAvis: Optional[str] = None
+
     youtube_video: Optional[str] = None
     youtube_query: Optional[str] = None
     tiktok_video: Optional[str] = None
@@ -326,13 +272,11 @@ class EventPublic(BaseModel):
     insta_video: Optional[str] = None
     insta_query: Optional[str] = None
 
-    # parsed for frontend
     youtube_videos: List[SocialVideo] = Field(default_factory=list)
     tiktok_videos: List[SocialVideo] = Field(default_factory=list)
     insta_videos: List[SocialVideo] = Field(default_factory=list)
 
     price: Optional[str] = None
-
     confirmed: bool = False
 
     image: Optional[str] = None
@@ -359,7 +303,9 @@ class EventPatch(BaseModel):
     lon: Optional[float] = None
     website: Optional[str] = None
 
-    # socials acceptent string JSON OU liste python
+    # ✅ avis google (même nom JSON que le front)
+    UrlGoogleMapsAvis: Optional[str] = None
+
     youtube_video: Optional[Any] = None
     youtube_query: Optional[str] = None
     tiktok_video: Optional[Any] = None
@@ -394,6 +340,7 @@ def _get_columns(conn: Connection) -> set[str]:
             """,
             (EVENT_TABLE,),
         )
+        # column_name retourne la casse exacte si colonne quoted côté Django
         return {r["column_name"] for r in cur.fetchall()}
 
 
@@ -405,13 +352,17 @@ def _sel(cols: set[str], colname: str) -> SQL:
     return Identifier(colname) if _col_exists(cols, colname) else SQL("NULL")
 
 
+def _sel_quoted(cols: set[str], colname: str) -> SQL:
+    """
+    Pour colonnes Django avec majuscules: on doit sélectionner avec "ColName".
+    Ici on construit SQL('"ColName"') si la colonne existe.
+    """
+    if _col_exists(cols, colname):
+        return SQL('"{}"').format(SQL(colname))
+    return SQL("NULL")
+
+
 def _confirmed_expr(cols: set[str]) -> SQL:
-    """
-    Expose un champ bool 'confirmed' pour le frontend.
-    - si validated_from_web existe -> validated_from_web
-    - sinon si active existe -> active (0/1) cast bool
-    - sinon -> FALSE
-    """
     if _col_exists(cols, "validated_from_web"):
         return Identifier("validated_from_web")
     if _col_exists(cols, "active"):
@@ -435,47 +386,35 @@ def _row_to_event(r: Dict[str, Any]) -> EventPublic:
     tt_raw = r.get("tiktok_video")
     ig_raw = r.get("insta_video")
 
-    try:
-        return EventPublic(
-            id=int(event_id),
-            titre=r.get("titre"),
-            titre_fr=r.get("titre_fr"),
-            adresse=r.get("adresse"),
-            city=r.get("city"),
-            codePostal=r.get("codePostal"),
-            region=r.get("region"),
-            subregion=r.get("subregion"),
-            pays=r.get("pays"),
-            lat=lat,
-            lon=lon,
-            bioEvent=r.get("bioEvent"),
-            website=r.get("website"),
-            youtube_video=yt_raw,
-            youtube_query=r.get("youtube_query"),
-            tiktok_video=tt_raw,
-            tiktok_query=r.get("tiktok_query"),
-            insta_video=ig_raw,
-            insta_query=r.get("insta_query"),
-            youtube_videos=_parse_social_list(yt_raw),
-            tiktok_videos=_parse_social_list(tt_raw),
-            insta_videos=_parse_social_list(ig_raw),
-            price=r.get("price"),
-            confirmed=bool(r.get("confirmed") or False),
-            image=r.get("image"),
-            video=r.get("video"),
-        )
-    except Exception:
-        # Log riche pour savoir EXACTEMENT quel event casse encore
-        logger.exception(
-            "Row->Event conversion failed for event_id=%r (titre=%r, adresse=%r, city=%r, lat_raw=%r, lon_raw=%r)",
-            event_id,
-            r.get("titre"),
-            r.get("adresse"),
-            r.get("city"),
-            lat_raw,
-            lon_raw,
-        )
-        raise
+    return EventPublic(
+        id=int(event_id),
+        titre=r.get("titre"),
+        titre_fr=r.get("titre_fr"),
+        adresse=r.get("adresse"),
+        city=r.get("city"),
+        codePostal=r.get("codePostal"),
+        region=r.get("region"),
+        subregion=r.get("subregion"),
+        pays=r.get("pays"),
+        lat=lat,
+        lon=lon,
+        bioEvent=r.get("bioEvent"),
+        website=r.get("website"),
+        UrlGoogleMapsAvis=r.get("UrlGoogleMapsAvis"),
+        youtube_video=yt_raw,
+        youtube_query=r.get("youtube_query"),
+        tiktok_video=tt_raw,
+        tiktok_query=r.get("tiktok_query"),
+        insta_video=ig_raw,
+        insta_query=r.get("insta_query"),
+        youtube_videos=_parse_social_list(yt_raw),
+        tiktok_videos=_parse_social_list(tt_raw),
+        insta_videos=_parse_social_list(ig_raw),
+        price=r.get("price"),
+        confirmed=bool(r.get("confirmed") or False),
+        image=r.get("image"),
+        video=r.get("video"),
+    )
 
 
 # -------------------------
@@ -510,10 +449,8 @@ def create_event(
 
     try:
         cols = _get_columns(conn)
-
         today = date.today()
 
-        # defaults
         nbStories_default = 0
         nbAlreadyPublished_default = 0
         active_default = 0
@@ -522,8 +459,7 @@ def create_event(
         isFull_default = False
         validated_default = False
 
-        # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
-        # We only want a transaction here.
+        # IMPORTANT psycopg3: with conn: ferme la connexion -> on utilise transaction()
         with conn.transaction():
             with conn.cursor() as cur:
                 insert_cols = [
@@ -581,9 +517,9 @@ def create_event(
                 cur.execute(q, values)
                 event_id = cur.fetchone()[0]
 
-                q2 = SQL(
-                    'INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id'
-                ).format(Identifier(FILESEVENT_TABLE))
+                q2 = SQL('INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id').format(
+                    Identifier(FILESEVENT_TABLE)
+                )
                 cur.execute(q2, (event_id, image_path, video_path))
                 files_event_id = cur.fetchone()[0]
 
@@ -641,6 +577,7 @@ def list_events(
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
+                  {avis} as "UrlGoogleMapsAvis",
 
                   {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
@@ -664,6 +601,7 @@ def list_events(
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
+                avis=_sel_quoted(cols, "UrlGoogleMapsAvis"),
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -684,23 +622,9 @@ def list_events(
         try:
             items.append(_row_to_event(r))
         except Exception:
-            # Ici on log déjà dans _row_to_event (logger.exception).
-            # Mais on évite de casser tout le listing : on skip l'event fautif.
-            # Si tu préfères "fail fast", remplace par `raise`.
             if EVENT_DEBUG:
                 logger.debug("Skipping event_id=%r due to conversion error", r.get("id"))
             continue
-
-    if EVENT_DEBUG:
-        logger.debug(
-            "list_events: returned=%s skipped=%s total=%s limit=%s offset=%s q=%r",
-            len(items),
-            max(0, len(rows) - len(items)),
-            total,
-            limit,
-            offset,
-            q,
-        )
 
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
 
@@ -724,6 +648,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
+                  {avis} as "UrlGoogleMapsAvis",
 
                   {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
@@ -746,6 +671,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
+                avis=_sel_quoted(cols, "UrlGoogleMapsAvis"),
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -761,12 +687,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
     if not r:
         raise HTTPException(status_code=404, detail="Event introuvable")
 
-    try:
-        return _row_to_event(r)
-    except Exception as e:
-        # Ici on préfère ne pas cacher l’erreur sur un endpoint single.
-        logger.exception("get_event failed for event_id=%s", event_id)
-        raise HTTPException(status_code=500, detail=f"Erreur sérialisation event {event_id}: {e}")
+    return _row_to_event(r)
 
 
 # -------------------------
@@ -788,6 +709,10 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "lat": "lat",
         "lon": "lon",
         "website": "website",
+
+        # ✅ avis google
+        "UrlGoogleMapsAvis": "UrlGoogleMapsAvis",
+
         "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
         "tiktok_video": "tiktok_video",
@@ -804,21 +729,21 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     sets: list[SQL] = []
     values: list[Any] = []
 
+    QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "UrlGoogleMapsAvis"}
+
     for api_key, value in data.items():
         db_col = mapping.get(api_key)
         if not db_col:
             continue
 
-        # ignore missing columns (except quoted django columns we might still have)
-        if db_col not in cols and db_col not in {"bioEvent", "codePostal"}:
+        if db_col not in cols and db_col not in QUOTED_DJANGO_COLS:
             continue
 
-        # normalize socials
         if db_col in {"youtube_video", "tiktok_video", "insta_video"}:
             value = _normalize_social_patch(value)
 
-        # quoted columns in Django
-        if db_col in {"bioEvent", "codePostal"}:
+        if db_col in QUOTED_DJANGO_COLS:
+            # colonne case-sensitive / quoted
             sets.append(SQL('"{}" = %s').format(SQL(db_col)))
         else:
             sets.append(SQL("{} = %s").format(Identifier(db_col)))
@@ -835,8 +760,6 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     )
     values.append(event_id)
 
-    # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
-    # We only want a transaction here.
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(q, values)
@@ -864,8 +787,6 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
             detail="Pas de champ 'validated_from_web' ni 'active' dans la table event",
         )
 
-    # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
-    # We only want a transaction here.
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(q, vals)
