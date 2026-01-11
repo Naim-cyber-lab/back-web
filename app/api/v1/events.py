@@ -762,6 +762,8 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 
     with conn.transaction():
         with conn.cursor() as cur:
+            cur.execute("select current_database(), current_schema(), inet_server_addr(), inet_server_port()")
+            print("voici le q == ",q)
             cur.execute(q, values)
 
     logger.info("Event patched event_id=%s fields=%s", event_id, list(data.keys()))
