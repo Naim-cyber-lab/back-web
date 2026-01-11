@@ -219,17 +219,43 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
       - string JSON
       - list[str]
       - list[{url, approved?}]
-    Return normalized JSON string (list of objects) or None.
+      - list[SocialVideo-like]
+    Return: JSON string (or None).
     """
     if value is None:
         return None
 
-    # already string: json list or url
+    # already JSON string
     if isinstance(value, str):
-        vids = _parse_social_list(value)
-        return _dump_social_list(vids)
+        s = value.strip()
+        if not s:
+            return None
+        # ensure it's valid json list if possible
+        try:
+            data = json.loads(s)
+            if isinstance(data, list):
+                out: List[SocialVideo] = []
+                for item in data:
+                    if isinstance(item, str):
+                        u = item.strip()
+                        if u:
+                            out.append(SocialVideo(url=u, approved=None))
+                    elif isinstance(item, dict):
+                        u = str(item.get("url", "")).strip()
+                        if not u:
+                            continue
+                        approved = item.get("approved", None)
+                        if approved is not None:
+                            approved = bool(approved)
+                        out.append(SocialVideo(url=u, approved=approved))
+                return _dump_social_list(out)
+        except Exception:
+            # maybe it's a single URL
+            return _dump_social_list([SocialVideo(url=s, approved=None)])
 
-    # list python
+        return s
+
+    # list payload
     if isinstance(value, list):
         out: List[SocialVideo] = []
         for item in value:
@@ -245,23 +271,32 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                 if approved is not None:
                     approved = bool(approved)
                 out.append(SocialVideo(url=u, approved=approved))
+            else:
+                # try object with attributes
+                try:
+                    u = str(getattr(item, "url", "")).strip()
+                    if not u:
+                        continue
+                    approved = getattr(item, "approved", None)
+                    if approved is not None:
+                        approved = bool(approved)
+                    out.append(SocialVideo(url=u, approved=approved))
+                except Exception:
+                    continue
         return _dump_social_list(out)
 
-    # dict single
-    if isinstance(value, dict):
-        u = str(value.get("url", "")).strip()
-        if not u:
+    # fallback
+    try:
+        s = str(value).strip()
+        if not s:
             return None
-        approved = value.get("approved", None)
-        if approved is not None:
-            approved = bool(approved)
-        return _dump_social_list([SocialVideo(url=u, approved=approved)])
-
-    return None
+        return _dump_social_list([SocialVideo(url=s, approved=None)])
+    except Exception:
+        return None
 
 
 # -------------------------
-# Models API
+# Schemas API
 # -------------------------
 class EventPublic(BaseModel):
     id: int
@@ -371,35 +406,38 @@ def _sel(cols: set[str], colname: str) -> SQL:
 
 
 def _confirmed_expr(cols: set[str]) -> SQL:
-    return (
-        SQL("COALESCE(e.validated_from_web, false)")
-        if _col_exists(cols, "validated_from_web")
-        else SQL("COALESCE(e.active, 0) = 1")
-    )
+    """
+    Expose un champ bool 'confirmed' pour le frontend.
+    - si validated_from_web existe -> validated_from_web
+    - sinon si active existe -> active (0/1) cast bool
+    - sinon -> FALSE
+    """
+    if _col_exists(cols, "validated_from_web"):
+        return Identifier("validated_from_web")
+    if _col_exists(cols, "active"):
+        return SQL("(CASE WHEN {} = 1 THEN TRUE ELSE FALSE END)").format(Identifier("active"))
+    return SQL("FALSE")
 
 
 def _row_to_event(r: Dict[str, Any]) -> EventPublic:
-    """
-    Convertit une row DB vers le modèle public.
-    IMPORTANT: sanitize lat/lon pour éviter NaN/Inf qui crashent la sérialisation JSON.
-    """
-    event_id = r.get("id", "?")
+    event_id = r.get("id")
+
+    lat_raw = r.get("lat")
+    lon_raw = r.get("lon")
+
+    lat = _json_safe_float(lat_raw)
+    lon = _json_safe_float(lon_raw)
+
+    _log_if_float_was_sanitized(event_id, "lat", lat_raw, lat)
+    _log_if_float_was_sanitized(event_id, "lon", lon_raw, lon)
 
     yt_raw = r.get("youtube_video")
     tt_raw = r.get("tiktok_video")
     ig_raw = r.get("insta_video")
 
-    lat_raw = r.get("lat")
-    lon_raw = r.get("lon")
-    lat_clean = _json_safe_float(lat_raw)
-    lon_clean = _json_safe_float(lon_raw)
-
-    _log_if_float_was_sanitized(event_id, "lat", lat_raw, lat_clean)
-    _log_if_float_was_sanitized(event_id, "lon", lon_raw, lon_clean)
-
     try:
         return EventPublic(
-            id=r["id"],
+            id=int(event_id),
             titre=r.get("titre"),
             titre_fr=r.get("titre_fr"),
             adresse=r.get("adresse"),
@@ -408,8 +446,8 @@ def _row_to_event(r: Dict[str, Any]) -> EventPublic:
             region=r.get("region"),
             subregion=r.get("subregion"),
             pays=r.get("pays"),
-            lat=lat_clean,
-            lon=lon_clean,
+            lat=lat,
+            lon=lon,
             bioEvent=r.get("bioEvent"),
             website=r.get("website"),
             youtube_video=yt_raw,
@@ -484,7 +522,9 @@ def create_event(
         isFull_default = False
         validated_default = False
 
-        with conn:
+        # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
+        # We only want a transaction here.
+        with conn.transaction():
             with conn.cursor() as cur:
                 insert_cols = [
                     "creatorWinker_id",
@@ -795,7 +835,9 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     )
     values.append(event_id)
 
-    with conn:
+    # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
+    # We only want a transaction here.
+    with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(q, values)
 
@@ -822,7 +864,9 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
             detail="Pas de champ 'validated_from_web' ni 'active' dans la table event",
         )
 
-    with conn:
+    # IMPORTANT (psycopg3): `with conn:` closes the connection at exit.
+    # We only want a transaction here.
+    with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(q, vals)
 
