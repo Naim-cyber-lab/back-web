@@ -33,8 +33,8 @@ if _EVENT_LOG_LEVEL:
 
 EVENT_DEBUG = os.getenv("EVENT_DEBUG", "0") in {"1", "true", "TRUE", "yes", "YES"}
 
-# Tables Django (override via env si besoin)
-EVENT_TABLE = "profil_event"
+# Tables Django
+EVENT_TABLE = os.getenv("DJANGO_EVENT_TABLE", "profil_event")
 FILESEVENT_TABLE = os.getenv("DJANGO_FILESEVENT_TABLE", "profil_filesevent")
 
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/app/media")
@@ -158,6 +158,7 @@ def _parse_social_list(raw: Optional[str]) -> List[SocialVideo]:
         if EVENT_DEBUG:
             logger.debug("Social parse failed raw=%r err=%s", raw, e)
 
+    # fallback: raw est une URL
     return [SocialVideo(url=s, approved=None)]
 
 
@@ -173,9 +174,14 @@ def _dump_social_list(videos: List[SocialVideo]) -> Optional[str]:
 
 
 def _normalize_social_patch(value: Any) -> Optional[str]:
+    """
+    Normalise l'input patch pour youtube_video/tiktok_video/insta_video
+    vers un JSON string (ou None).
+    """
     if value is None:
         return None
 
+    # si c'est déjà une string JSON / URL / etc.
     if isinstance(value, str):
         s = value.strip()
         if not s:
@@ -199,9 +205,11 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                         out.append(SocialVideo(url=u, approved=approved))
                 return _dump_social_list(out)
         except Exception:
+            # si ce n'est pas du JSON: on traite comme URL
             return _dump_social_list([SocialVideo(url=s, approved=None)])
         return s
 
+    # si c'est une liste (front envoie souvent list[dict])
     if isinstance(value, list):
         out: List[SocialVideo] = []
         for item in value:
@@ -230,6 +238,7 @@ def _normalize_social_patch(value: Any) -> Optional[str]:
                     continue
         return _dump_social_list(out)
 
+    # fallback: cast string
     try:
         s = str(value).strip()
         if not s:
@@ -262,7 +271,7 @@ class EventPublic(BaseModel):
     bioEvent: Optional[str] = None
     website: Optional[str] = None
 
-    # ✅ avis google (colonne Django avec majuscules)
+    # ✅ colonne DB: "urlGoogleMapsAvis"
     urlGoogleMapsAvis: Optional[str] = None
 
     youtube_video: Optional[str] = None
@@ -303,7 +312,7 @@ class EventPatch(BaseModel):
     lon: Optional[float] = None
     website: Optional[str] = None
 
-    # ✅ avis google (même nom JSON que le front)
+    # ✅ nom JSON = nom DB (quoted)
     urlGoogleMapsAvis: Optional[str] = None
 
     youtube_video: Optional[Any] = None
@@ -331,16 +340,20 @@ class EventCreateResponse(BaseModel):
 # Introspection util
 # -------------------------
 def _get_columns(conn: Connection) -> set[str]:
+    """
+    Retourne la liste exacte des colonnes (avec casse) de la table EVENT_TABLE
+    dans le schéma courant.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = %s
+              AND table_schema = current_schema()
             """,
             (EVENT_TABLE,),
         )
-        # column_name retourne la casse exacte si colonne quoted côté Django
         return {r["column_name"] for r in cur.fetchall()}
 
 
@@ -354,8 +367,7 @@ def _sel(cols: set[str], colname: str) -> SQL:
 
 def _sel_quoted(cols: set[str], colname: str) -> SQL:
     """
-    Pour colonnes Django avec majuscules: on doit sélectionner avec "ColName".
-    Ici on construit SQL('"ColName"') si la colonne existe.
+    Pour colonnes Django avec majuscules / camelCase: sélectionner avec "ColName".
     """
     if _col_exists(cols, colname):
         return SQL('"{}"').format(SQL(colname))
@@ -459,7 +471,6 @@ def create_event(
         isFull_default = False
         validated_default = False
 
-        # IMPORTANT psycopg3: with conn: ferme la connexion -> on utilise transaction()
         with conn.transaction():
             with conn.cursor() as cur:
                 insert_cols = [
@@ -697,12 +708,6 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
 def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
-    print("voici l'event id == ",event_id)
-
-    print("voici le patch = ",patch)
-
-    print("voici les cols === ",_col_exists)
-
     mapping: dict[str, str] = {
         "titre": "titre",
         "bioEvent": "bioEvent",
@@ -715,10 +720,8 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "lat": "lat",
         "lon": "lon",
         "website": "website",
-
-        # ✅ avis google
+        # ✅ avis google (DB: "urlGoogleMapsAvis")
         "urlGoogleMapsAvis": "urlGoogleMapsAvis",
-
         "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
         "tiktok_video": "tiktok_video",
@@ -729,14 +732,13 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     }
 
     data = patch.model_dump(exclude_unset=True)
-
-    print("voici la data = ",data)
     if not data:
         return get_event(event_id, conn)
 
     sets: list[SQL] = []
     values: list[Any] = []
 
+    # Colonnes réellement quoted/case-sensitive dans la table
     QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "urlGoogleMapsAvis"}
 
     for api_key, value in data.items():
@@ -744,14 +746,16 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         if not db_col:
             continue
 
-        if db_col not in cols and db_col not in QUOTED_DJANGO_COLS:
+        # ✅ IMPORTANT: on n'update JAMAIS une colonne absente (quoted ou non)
+        if db_col not in cols:
+            if EVENT_DEBUG:
+                logger.debug("Skipping patch field %s -> %s (col absent)", api_key, db_col)
             continue
 
         if db_col in {"youtube_video", "tiktok_video", "insta_video"}:
             value = _normalize_social_patch(value)
 
         if db_col in QUOTED_DJANGO_COLS:
-            # colonne case-sensitive / quoted
             sets.append(SQL('"{}" = %s').format(SQL(db_col)))
         else:
             sets.append(SQL("{} = %s").format(Identifier(db_col)))
@@ -761,20 +765,35 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     if not sets:
         return get_event(event_id, conn)
 
+    # ✅ RETURNING + logs (preuve que ça a bien modifié)
     q = (
         SQL("UPDATE {} SET ").format(Identifier(EVENT_TABLE))
         + SQL(", ").join(sets)
-        + SQL(" WHERE id = %s")
+        + SQL(' WHERE id = %s RETURNING id, "bioEvent"')
     )
     values.append(event_id)
 
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("select current_database(), current_schema(), inet_server_addr(), inet_server_port()")
-            print("voici le q == ",q)
-            cur.execute(q, values)
+            # debug infra (optionnel)
+            if EVENT_DEBUG:
+                cur.execute("select current_database(), current_schema(), inet_server_addr(), inet_server_port()")
+                logger.debug("DB info=%s", cur.fetchone())
 
-    logger.info("Event patched event_id=%s fields=%s", event_id, list(data.keys()))
+                cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
+                logger.debug("BEFORE bioEvent=%r", cur.fetchone())
+
+            cur.execute(q, values)
+            ret = cur.fetchone()
+            logger.info("Event patched event_id=%s rowcount=%s returning=%r fields=%s", event_id, cur.rowcount, ret, list(data.keys()))
+
+            if EVENT_DEBUG:
+                cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
+                logger.debug("AFTER bioEvent=%r", cur.fetchone())
+
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Event introuvable (aucune ligne mise à jour)")
+
     return get_event(event_id, conn)
 
 
