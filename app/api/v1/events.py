@@ -534,7 +534,7 @@ def create_event(
                 cur.execute(q2, (event_id, image_path, video_path))
                 files_event_id = cur.fetchone()[0]
 
-        logger.info("Event created event_id=%s files_event_id=%s", event_id, files_event_id)
+        print(f"Event created event_id={event_id} files_event_id={files_event_id}")
 
         return EventCreateResponse(
             event_id=event_id,
@@ -720,7 +720,6 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "lat": "lat",
         "lon": "lon",
         "website": "website",
-        # ✅ avis google (DB: "urlGoogleMapsAvis")
         "urlGoogleMapsAvis": "urlGoogleMapsAvis",
         "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
@@ -732,24 +731,29 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     }
 
     data = patch.model_dump(exclude_unset=True)
+    print("[PATCH] event_id =", event_id, flush=True)
+    print("[PATCH] data =", data, flush=True)
+    print("[PATCH] EVENT_TABLE =", EVENT_TABLE, flush=True)
+    print("[PATCH] cols_has_bioEvent =", ("bioEvent" in cols), flush=True)
+    print("[PATCH] cols_has_urlGoogleMapsAvis =", ("urlGoogleMapsAvis" in cols), flush=True)
+
     if not data:
+        print("[PATCH] no data -> get_event()", flush=True)
         return get_event(event_id, conn)
+
+    QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "urlGoogleMapsAvis"}
 
     sets: list[SQL] = []
     values: list[Any] = []
 
-    # Colonnes réellement quoted/case-sensitive dans la table
-    QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "urlGoogleMapsAvis"}
-
     for api_key, value in data.items():
         db_col = mapping.get(api_key)
         if not db_col:
+            print("[PATCH] skip unknown api_key", api_key, flush=True)
             continue
 
-        # ✅ IMPORTANT: on n'update JAMAIS une colonne absente (quoted ou non)
         if db_col not in cols:
-            if EVENT_DEBUG:
-                logger.debug("Skipping patch field %s -> %s (col absent)", api_key, db_col)
+            print("[PATCH] skip missing column:", db_col, flush=True)
             continue
 
         if db_col in {"youtube_video", "tiktok_video", "insta_video"}:
@@ -763,9 +767,9 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         values.append(value)
 
     if not sets:
+        print("[PATCH] sets empty -> get_event()", flush=True)
         return get_event(event_id, conn)
 
-    # ✅ RETURNING + logs (preuve que ça a bien modifié)
     q = (
         SQL("UPDATE {} SET ").format(Identifier(EVENT_TABLE))
         + SQL(", ").join(sets)
@@ -775,21 +779,23 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 
     with conn.transaction():
         with conn.cursor() as cur:
-            # debug infra (optionnel)
-            if EVENT_DEBUG:
-                cur.execute("select current_database(), current_schema(), inet_server_addr(), inet_server_port()")
-                logger.debug("DB info=%s", cur.fetchone())
+            cur.execute("select current_database(), current_schema()")
+            print("[PATCH] DB =", cur.fetchone(), flush=True)
 
-                cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
-                logger.debug("BEFORE bioEvent=%r", cur.fetchone())
+            cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
+            print("[PATCH] BEFORE bioEvent =", cur.fetchone(), flush=True)
+
+            print("[PATCH] q =", q, flush=True)
+            print("[PATCH] values =", values, flush=True)
 
             cur.execute(q, values)
             ret = cur.fetchone()
-            logger.info("Event patched event_id=%s rowcount=%s returning=%r fields=%s", event_id, cur.rowcount, ret, list(data.keys()))
 
-            if EVENT_DEBUG:
-                cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
-                logger.debug("AFTER bioEvent=%r", cur.fetchone())
+            print("[PATCH] rowcount =", cur.rowcount, flush=True)
+            print("[PATCH] returning =", ret, flush=True)
+
+            cur.execute(SQL('SELECT "bioEvent" FROM {} WHERE id=%s').format(Identifier(EVENT_TABLE)), (event_id,))
+            print("[PATCH] AFTER bioEvent =", cur.fetchone(), flush=True)
 
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Event introuvable (aucune ligne mise à jour)")
@@ -820,5 +826,5 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
         with conn.cursor() as cur:
             cur.execute(q, vals)
 
-    logger.info("Event confirm updated event_id=%s confirmed=%s", event_id, body.confirmed)
+    print(f"Event confirm updated event_id={event_id} confirmed={body.confirmed}")
     return get_event(event_id, conn)
