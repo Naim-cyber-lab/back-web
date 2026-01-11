@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import uuid
 from datetime import date
-from typing import Any, Optional, List, Dict, Union
+from typing import Any, Optional, List, Dict
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
@@ -16,6 +18,26 @@ from psycopg.sql import SQL, Identifier
 from app.core.db import get_conn
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+# -------------------------
+# Logging
+# -------------------------
+logger = logging.getLogger(__name__)
+
+# Mets EVENT_LOG_LEVEL=DEBUG si tu veux plus de verbosité.
+# Par défaut, on ne touche pas au global logging config (c'est l'app qui doit le faire),
+# mais on te donne un levier simple par env.
+_EVENT_LOG_LEVEL = os.getenv("EVENT_LOG_LEVEL")
+if _EVENT_LOG_LEVEL:
+    try:
+        logger.setLevel(_EVENT_LOG_LEVEL.upper())
+    except Exception:
+        # si valeur invalide, on ignore
+        pass
+
+# Active des logs plus "bruyants" (ex: rows problématiques) si EVENT_DEBUG=1
+EVENT_DEBUG = os.getenv("EVENT_DEBUG", "0") in {"1", "true", "TRUE", "yes", "YES"}
+
 
 # Tables Django (override via env si besoin)
 EVENT_TABLE = os.getenv("DJANGO_EVENT_TABLE", "profil_event")
@@ -81,6 +103,54 @@ def _delete_file_quiet(rel_path: Optional[str]) -> None:
 
 
 # -------------------------
+# JSON-safe numbers (fix NaN/Inf)
+# -------------------------
+def _json_safe_float(v: Any) -> Optional[float]:
+    """
+    JSON strict interdit NaN / Infinity / -Infinity.
+    On renvoie None si non fini.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def _log_if_float_was_sanitized(event_id: Any, field: str, raw: Any, cleaned: Optional[float]) -> None:
+    """
+    Log un warning si raw était un NaN/Inf (ou valeur non convertible) et a été nettoyé.
+    """
+    # On essaye de détecter "différence" proprement (sans casser si raw est non comparable)
+    try:
+        raw_float = float(raw) if raw is not None else None
+    except Exception:
+        raw_float = None
+
+    # Si raw existe mais cleaned est None -> très probablement NaN/Inf ou truc invalide
+    if raw is not None and cleaned is None:
+        logger.warning(
+            "Event %s: champ %s non JSON-serializable (raw=%r) -> cleaned=None",
+            event_id,
+            field,
+            raw,
+        )
+    # Si raw était convertible et cleaned est un float différent (cas rare), on log en debug
+    elif raw_float is not None and cleaned is not None and raw_float != cleaned and EVENT_DEBUG:
+        logger.debug(
+            "Event %s: champ %s modifié (raw=%r -> cleaned=%r)",
+            event_id,
+            field,
+            raw,
+            cleaned,
+        )
+
+
+# -------------------------
 # Social list (JSON in TextField)
 # -------------------------
 class SocialVideo(BaseModel):
@@ -123,8 +193,9 @@ def _parse_social_list(raw: Optional[str]) -> List[SocialVideo]:
                         approved = bool(approved)
                     out.append(SocialVideo(url=u, approved=approved))
             return out
-    except Exception:
-        pass
+    except Exception as e:
+        if EVENT_DEBUG:
+            logger.debug("Social parse failed raw=%r err=%s", raw, e)
 
     # fallback: single URL
     return [SocialVideo(url=s, approved=None)]
@@ -301,46 +372,72 @@ def _sel(cols: set[str], colname: str) -> SQL:
 
 def _confirmed_expr(cols: set[str]) -> SQL:
     return (
-        SQL("COALESCE(e.validated_from_web, false)") if _col_exists(cols, "validated_from_web")
+        SQL("COALESCE(e.validated_from_web, false)")
+        if _col_exists(cols, "validated_from_web")
         else SQL("COALESCE(e.active, 0) = 1")
     )
 
 
 def _row_to_event(r: Dict[str, Any]) -> EventPublic:
+    """
+    Convertit une row DB vers le modèle public.
+    IMPORTANT: sanitize lat/lon pour éviter NaN/Inf qui crashent la sérialisation JSON.
+    """
+    event_id = r.get("id", "?")
+
     yt_raw = r.get("youtube_video")
     tt_raw = r.get("tiktok_video")
     ig_raw = r.get("insta_video")
-    return EventPublic(
-        id=r["id"],
-        titre=r.get("titre"),
-        titre_fr=r.get("titre_fr"),
-        adresse=r.get("adresse"),
-        city=r.get("city"),
-        codePostal=r.get("codePostal"),
-        region=r.get("region"),
-        subregion=r.get("subregion"),
-        pays=r.get("pays"),
-        lat=r.get("lat"),
-        lon=r.get("lon"),
-        bioEvent=r.get("bioEvent"),
-        website=r.get("website"),
 
-        youtube_video=yt_raw,
-        youtube_query=r.get("youtube_query"),
-        tiktok_video=tt_raw,
-        tiktok_query=r.get("tiktok_query"),
-        insta_video=ig_raw,
-        insta_query=r.get("insta_query"),
+    lat_raw = r.get("lat")
+    lon_raw = r.get("lon")
+    lat_clean = _json_safe_float(lat_raw)
+    lon_clean = _json_safe_float(lon_raw)
 
-        youtube_videos=_parse_social_list(yt_raw),
-        tiktok_videos=_parse_social_list(tt_raw),
-        insta_videos=_parse_social_list(ig_raw),
+    _log_if_float_was_sanitized(event_id, "lat", lat_raw, lat_clean)
+    _log_if_float_was_sanitized(event_id, "lon", lon_raw, lon_clean)
 
-        price=r.get("price"),
-        confirmed=bool(r.get("confirmed") or False),
-        image=r.get("image"),
-        video=r.get("video"),
-    )
+    try:
+        return EventPublic(
+            id=r["id"],
+            titre=r.get("titre"),
+            titre_fr=r.get("titre_fr"),
+            adresse=r.get("adresse"),
+            city=r.get("city"),
+            codePostal=r.get("codePostal"),
+            region=r.get("region"),
+            subregion=r.get("subregion"),
+            pays=r.get("pays"),
+            lat=lat_clean,
+            lon=lon_clean,
+            bioEvent=r.get("bioEvent"),
+            website=r.get("website"),
+            youtube_video=yt_raw,
+            youtube_query=r.get("youtube_query"),
+            tiktok_video=tt_raw,
+            tiktok_query=r.get("tiktok_query"),
+            insta_video=ig_raw,
+            insta_query=r.get("insta_query"),
+            youtube_videos=_parse_social_list(yt_raw),
+            tiktok_videos=_parse_social_list(tt_raw),
+            insta_videos=_parse_social_list(ig_raw),
+            price=r.get("price"),
+            confirmed=bool(r.get("confirmed") or False),
+            image=r.get("image"),
+            video=r.get("video"),
+        )
+    except Exception:
+        # Log riche pour savoir EXACTEMENT quel event casse encore
+        logger.exception(
+            "Row->Event conversion failed for event_id=%r (titre=%r, adresse=%r, city=%r, lat_raw=%r, lon_raw=%r)",
+            event_id,
+            r.get("titre"),
+            r.get("adresse"),
+            r.get("city"),
+            lat_raw,
+            lon_raw,
+        )
+        raise
 
 
 # -------------------------
@@ -390,16 +487,36 @@ def create_event(
         with conn:
             with conn.cursor() as cur:
                 insert_cols = [
-                    "creatorWinker_id", "titre", "titre_fr",
-                    "dateEvent", "datePublication",
-                    "adresse", "city", "region", "subregion", "pays", "codePostal",
-                    "bioEvent", "lon", "lat",
+                    "creatorWinker_id",
+                    "titre",
+                    "titre_fr",
+                    "dateEvent",
+                    "datePublication",
+                    "adresse",
+                    "city",
+                    "region",
+                    "subregion",
+                    "pays",
+                    "codePostal",
+                    "bioEvent",
+                    "lon",
+                    "lat",
                 ]
                 values = [
-                    creator_winker_id, titre or "", titre_fr,
-                    date_event, today,
-                    adresse, city, region, subregion, pays, code_postal,
-                    bio_event, lon, lat,
+                    creator_winker_id,
+                    titre or "",
+                    titre_fr,
+                    date_event,
+                    today,
+                    adresse,
+                    city,
+                    region,
+                    subregion,
+                    pays,
+                    code_postal,
+                    bio_event,
+                    lon,
+                    lat,
                 ]
 
                 def add_if_exists(c: str, v: Any):
@@ -424,11 +541,13 @@ def create_event(
                 cur.execute(q, values)
                 event_id = cur.fetchone()[0]
 
-                q2 = SQL('INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id').format(
-                    Identifier(FILESEVENT_TABLE)
-                )
+                q2 = SQL(
+                    'INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id'
+                ).format(Identifier(FILESEVENT_TABLE))
                 cur.execute(q2, (event_id, image_path, video_path))
                 files_event_id = cur.fetchone()[0]
+
+        logger.info("Event created event_id=%s files_event_id=%s", event_id, files_event_id)
 
         return EventCreateResponse(
             event_id=event_id,
@@ -438,6 +557,7 @@ def create_event(
         )
 
     except Exception as e:
+        logger.exception("Erreur création event (creator_winker_id=%s)", creator_winker_id)
         _delete_file_quiet(video_path)
         _delete_file_quiet(image_path)
         raise HTTPException(status_code=500, detail=f"Erreur création event: {e}")
@@ -504,7 +624,6 @@ def list_events(
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
-
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -520,7 +639,29 @@ def list_events(
         cur.execute(query, params + [limit, offset])
         rows = cur.fetchall()
 
-    items = [_row_to_event(r) for r in rows]
+    items: list[EventPublic] = []
+    for r in rows:
+        try:
+            items.append(_row_to_event(r))
+        except Exception:
+            # Ici on log déjà dans _row_to_event (logger.exception).
+            # Mais on évite de casser tout le listing : on skip l'event fautif.
+            # Si tu préfères "fail fast", remplace par `raise`.
+            if EVENT_DEBUG:
+                logger.debug("Skipping event_id=%r due to conversion error", r.get("id"))
+            continue
+
+    if EVENT_DEBUG:
+        logger.debug(
+            "list_events: returned=%s skipped=%s total=%s limit=%s offset=%s q=%r",
+            len(items),
+            max(0, len(rows) - len(items)),
+            total,
+            limit,
+            offset,
+            q,
+        )
+
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -565,7 +706,6 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
-
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -581,7 +721,12 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
     if not r:
         raise HTTPException(status_code=404, detail="Event introuvable")
 
-    return _row_to_event(r)
+    try:
+        return _row_to_event(r)
+    except Exception as e:
+        # Ici on préfère ne pas cacher l’erreur sur un endpoint single.
+        logger.exception("get_event failed for event_id=%s", event_id)
+        raise HTTPException(status_code=500, detail=f"Erreur sérialisation event {event_id}: {e}")
 
 
 # -------------------------
@@ -603,14 +748,12 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "lat": "lat",
         "lon": "lon",
         "website": "website",
-
         "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
         "tiktok_video": "tiktok_video",
         "tiktok_query": "tiktok_query",
         "insta_video": "insta_video",
         "insta_query": "insta_query",
-
         "price": "price",
     }
 
@@ -645,13 +788,18 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     if not sets:
         return get_event(event_id, conn)
 
-    q = SQL("UPDATE {} SET ").format(Identifier(EVENT_TABLE)) + SQL(", ").join(sets) + SQL(" WHERE id = %s")
+    q = (
+        SQL("UPDATE {} SET ").format(Identifier(EVENT_TABLE))
+        + SQL(", ").join(sets)
+        + SQL(" WHERE id = %s")
+    )
     values.append(event_id)
 
     with conn:
         with conn.cursor() as cur:
             cur.execute(q, values)
 
+    logger.info("Event patched event_id=%s fields=%s", event_id, list(data.keys()))
     return get_event(event_id, conn)
 
 
@@ -669,10 +817,14 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
         q = SQL("UPDATE {} SET active = %s WHERE id = %s").format(Identifier(EVENT_TABLE))
         vals = (1 if body.confirmed else 0, event_id)
     else:
-        raise HTTPException(status_code=400, detail="Pas de champ 'validated_from_web' ni 'active' dans la table event")
+        raise HTTPException(
+            status_code=400,
+            detail="Pas de champ 'validated_from_web' ni 'active' dans la table event",
+        )
 
     with conn:
         with conn.cursor() as cur:
             cur.execute(q, vals)
 
+    logger.info("Event confirm updated event_id=%s confirmed=%s", event_id, body.confirmed)
     return get_event(event_id, conn)
