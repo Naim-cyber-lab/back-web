@@ -263,7 +263,7 @@ class EventPublic(BaseModel):
     website: Optional[str] = None
 
     # ✅ avis google (colonne Django avec majuscules)
-    UrlGoogleMapsAvis: Optional[str] = None
+    urlGoogleMapsAvis: Optional[str] = None
 
     youtube_video: Optional[str] = None
     youtube_query: Optional[str] = None
@@ -304,7 +304,7 @@ class EventPatch(BaseModel):
     website: Optional[str] = None
 
     # ✅ avis google (même nom JSON que le front)
-    UrlGoogleMapsAvis: Optional[str] = None
+    urlGoogleMapsAvis: Optional[str] = None
 
     youtube_video: Optional[Any] = None
     youtube_query: Optional[str] = None
@@ -400,7 +400,7 @@ def _row_to_event(r: Dict[str, Any]) -> EventPublic:
         lon=lon,
         bioEvent=r.get("bioEvent"),
         website=r.get("website"),
-        UrlGoogleMapsAvis=r.get("UrlGoogleMapsAvis"),
+        urlGoogleMapsAvis=r.get("urlGoogleMapsAvis"),
         youtube_video=yt_raw,
         youtube_query=r.get("youtube_query"),
         tiktok_video=tt_raw,
@@ -577,7 +577,7 @@ def list_events(
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
-                  {avis} as "UrlGoogleMapsAvis",
+                  {avis} as "urlGoogleMapsAvis",
 
                   {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
@@ -601,7 +601,7 @@ def list_events(
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
-                avis=_sel_quoted(cols, "UrlGoogleMapsAvis"),
+                avis=_sel_quoted(cols, "urlGoogleMapsAvis"),
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -648,7 +648,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                   e.lat, e.lon,
                   e."bioEvent" as "bioEvent",
                   e.website,
-                  {avis} as "UrlGoogleMapsAvis",
+                  {avis} as "urlGoogleMapsAvis",
 
                   {youtube_video} as youtube_video,
                   {youtube_query} as youtube_query,
@@ -671,7 +671,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
                 event_table=Identifier(EVENT_TABLE),
                 files_table=Identifier(FILESEVENT_TABLE),
                 confirmed=_confirmed_expr(cols),
-                avis=_sel_quoted(cols, "UrlGoogleMapsAvis"),
+                avis=_sel_quoted(cols, "urlGoogleMapsAvis"),
                 youtube_video=_sel(cols, "youtube_video"),
                 youtube_query=_sel(cols, "youtube_query"),
                 tiktok_video=_sel(cols, "tiktok_video"),
@@ -711,7 +711,7 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         "website": "website",
 
         # ✅ avis google
-        "UrlGoogleMapsAvis": "UrlGoogleMapsAvis",
+        "urlGoogleMapsAvis": "urlGoogleMapsAvis",
 
         "youtube_video": "youtube_video",
         "youtube_query": "youtube_query",
@@ -729,7 +729,7 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     sets: list[SQL] = []
     values: list[Any] = []
 
-    QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "UrlGoogleMapsAvis"}
+    QUOTED_DJANGO_COLS = {"bioEvent", "codePostal", "urlGoogleMapsAvis"}
 
     for api_key, value in data.items():
         db_col = mapping.get(api_key)
