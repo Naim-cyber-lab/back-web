@@ -34,7 +34,7 @@ if _EVENT_LOG_LEVEL:
 EVENT_DEBUG = os.getenv("EVENT_DEBUG", "0") in {"1", "true", "TRUE", "yes", "YES"}
 
 # Tables Django (override via env si besoin)
-EVENT_TABLE = os.getenv("DJANGO_EVENT_TABLE", "profil_event")
+EVENT_TABLE = "profil_event"
 FILESEVENT_TABLE = os.getenv("DJANGO_FILESEVENT_TABLE", "profil_filesevent")
 
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/app/media")
@@ -697,6 +697,12 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
 def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
+    print("voici l'event id == ",event_id)
+
+    print("voici le patch = ",patch)
+
+    print("voici les cols === ",_col_exists)
+
     mapping: dict[str, str] = {
         "titre": "titre",
         "bioEvent": "bioEvent",
@@ -723,6 +729,8 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
     }
 
     data = patch.model_dump(exclude_unset=True)
+
+    print("voici la data = ",data)
     if not data:
         return get_event(event_id, conn)
 
