@@ -47,8 +47,12 @@ ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 # -------------------------
 # DB dependency
 # -------------------------
-def conn_dep() -> Connection:
-    return get_conn()
+def conn_dep():
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 # -------------------------
