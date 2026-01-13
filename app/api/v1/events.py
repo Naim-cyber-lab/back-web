@@ -48,11 +48,8 @@ ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 # DB dependency
 # -------------------------
 def conn_dep():
-    conn = get_conn()
-    try:
+    with get_conn() as conn:   # commit auto si pas d'exception, rollback sinon
         yield conn
-    finally:
-        conn.close()
 
 
 # -------------------------
