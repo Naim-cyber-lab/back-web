@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import date
 from typing import Any, Optional, List, Dict
-
+import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from psycopg import Connection
@@ -807,6 +807,15 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 # -------------------------
 # Confirm endpoint
 # -------------------------
+DJANGO_BASE_URL = "https://api.nisu.fr"  # ou depuis env
+
+def _trigger_download_social_videos(event_id: int) -> dict:
+    url = f"{DJANGO_BASE_URL}/profil/downloadSocialVideos/{event_id}/"
+    r = requests.post(url, json={}, timeout=180)  # ytdlp peut être long
+    r.raise_for_status()
+    return r.json()
+
+
 @router.post("/{event_id}/confirm", response_model=EventPublic)
 def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
@@ -823,9 +832,25 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
             detail="Pas de champ 'validated_from_web' ni 'active' dans la table event",
         )
 
+    # 1) DB update (commit OK via conn.transaction)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(q, vals)
 
     print(f"Event confirm updated event_id={event_id} confirmed={body.confirmed}")
+
+    # 2) Trigger Django download (uniquement si confirmed=True)
+    download_result = None
+    if body.confirmed:
+        try:
+            download_result = _trigger_download_social_videos(event_id)
+            print(f"downloadSocialVideos OK event_id={event_id} result={download_result}")
+        except requests.Timeout:
+            # on ne casse pas le confirm, mais on log
+            print(f"downloadSocialVideos TIMEOUT event_id={event_id}")
+        except requests.RequestException as e:
+            print(f"downloadSocialVideos FAILED event_id={event_id} err={repr(e)}")
+
+    # 3) Return event
     return get_event(event_id, conn)
+
