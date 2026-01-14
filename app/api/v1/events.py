@@ -561,6 +561,11 @@ def list_events(
     q: Optional[str] = None,
     conn: Connection = Depends(conn_dep),
 ):
+    """
+    Liste paginée des events.
+    Important: on ne joint plus directement files_event (1->N) pour éviter les doublons.
+    On récupère au plus 1 fichier (le plus récent) via un LEFT JOIN LATERAL.
+    """
     cols = _get_columns(conn)
 
     where = SQL("TRUE")
@@ -572,6 +577,7 @@ def list_events(
         params.extend([like, like, like])
 
     with conn.cursor(row_factory=dict_row) as cur:
+        # total (sans join pour éviter de compter N fichiers par event)
         cur.execute(
             SQL("SELECT COUNT(*) AS n FROM {} e WHERE ").format(Identifier(EVENT_TABLE)) + where,
             params,
@@ -602,10 +608,17 @@ def list_events(
 
                   {price} as price,
                   {confirmed} as confirmed,
+
                   f.image as image,
                   f.video as video
                 FROM {event_table} e
-                LEFT JOIN {files_table} f ON f."event_id" = e.id
+                LEFT JOIN LATERAL (
+                  SELECT fe.image, fe.video
+                  FROM {files_table} fe
+                  WHERE fe."event_id" = e.id
+                  ORDER BY fe.id DESC
+                  LIMIT 1
+                ) f ON TRUE
                 WHERE
                 """
             )
@@ -639,7 +652,6 @@ def list_events(
             continue
 
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
-
 
 # -------------------------
 # Read - single
