@@ -592,7 +592,7 @@ def list_events(
                   e.titre, e.titre_fr,
                   e.adresse, e.city, e."codePostal" as "codePostal",
                   e.region, e.subregion, e.pays,
-                  e.lat, e.lon,
+                  e.lat, e.lon, e.validated_from_web,
                   e."bioEvent" as "bioEvent",
                   e.website,
                   {avis} as "urlGoogleMapsAvis",
