@@ -866,3 +866,12 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
     # 3) Return event
     return get_event(event_id, conn)
 
+
+
+# ✅ Endpoint de sauvegarde (DB only) : pas de validation, pas de download, pas d'effet de bord.
+@router.post("/{event_id}/save", response_model=EventPublic)
+def save_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
+    # On réutilise exactement la logique du PATCH (mise à jour DB)
+    # => ça n'active PAS validated_from_web
+    # => ça ne déclenche PAS _trigger_download_social_videos
+    return patch_event(event_id, patch, conn)
