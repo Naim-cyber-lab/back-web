@@ -559,25 +559,28 @@ def list_events(
     limit: int = 200,
     offset: int = 0,
     q: Optional[str] = None,
+    confirmed: Optional[bool] = None,  # ✅ NEW: filtre validated_from_web (ou active)
     conn: Connection = Depends(conn_dep),
 ):
-    """
-    Liste paginée des events.
-    Important: on ne joint plus directement files_event (1->N) pour éviter les doublons.
-    On récupère au plus 1 fichier (le plus récent) via un LEFT JOIN LATERAL.
-    """
     cols = _get_columns(conn)
 
-    where = SQL("TRUE")
+    where_parts: list[SQL] = [SQL("TRUE")]
     params: list[Any] = []
 
+    # filtre recherche
     if q and q.strip():
-        where = SQL("(e.titre ILIKE %s OR e.adresse ILIKE %s OR e.city ILIKE %s)")
+        where_parts.append(SQL("(e.titre ILIKE %s OR e.adresse ILIKE %s OR e.city ILIKE %s)"))
         like = f"%{q.strip()}%"
         params.extend([like, like, like])
 
+    # ✅ filtre confirmed / not confirmed
+    if confirmed is not None:
+        where_parts.append(SQL("{} = %s").format(_confirmed_expr(cols)))
+        params.append(bool(confirmed))
+
+    where = SQL(" AND ").join(where_parts)
+
     with conn.cursor(row_factory=dict_row) as cur:
-        # total (sans join pour éviter de compter N fichiers par event)
         cur.execute(
             SQL("SELECT COUNT(*) AS n FROM {} e WHERE ").format(Identifier(EVENT_TABLE)) + where,
             params,
@@ -652,6 +655,8 @@ def list_events(
             continue
 
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
 
 # -------------------------
 # Read - single
