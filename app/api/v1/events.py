@@ -880,3 +880,329 @@ def save_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn
     # => ça n'active PAS validated_from_web
     # => ça ne déclenche PAS _trigger_download_social_videos
     return patch_event(event_id, patch, conn)
+
+
+
+
+# --- NEW: Create from social video URL (no upload) ---
+
+class EventCreateFromSocialBody(BaseModel):
+    creator_winker_id: int
+    social_url: str
+
+    # mêmes champs que CreateEventPage
+    titre: Optional[str] = None
+    titre_fr: Optional[str] = None
+    date_event: Optional[date] = None
+
+    adresse: Optional[str] = None
+    city: Optional[str] = None
+    code_postal: Optional[str] = None
+
+    pays: Optional[str] = "France"
+    region: Optional[str] = None
+    subregion: Optional[str] = None
+    lon: Optional[float] = None
+    lat: Optional[float] = None
+
+    bio_event: Optional[str] = None
+
+    # optionnels: si tu veux aussi stocker les query
+    youtube_query: Optional[str] = None
+    tiktok_query: Optional[str] = None
+    insta_query: Optional[str] = None
+
+
+class EventCreateFromSocialResponse(BaseModel):
+    event_id: int
+    files_event_id: int
+    social_kind: str  # youtube|tiktok|insta
+    stored_field: str  # youtube_video|tiktok_video|insta_video
+
+
+def _detect_social_kind(url: str) -> Optional[str]:
+    u = (url or "").lower()
+    if "youtu.be" in u or "youtube.com" in u:
+        return "youtube"
+    if "tiktok.com" in u:
+        return "tiktok"
+    if "instagram.com" in u:
+        return "insta"
+    return None
+
+
+@router.post("/from-social", response_model=EventCreateFromSocialResponse, status_code=status.HTTP_201_CREATED)
+def create_event_from_social(body: EventCreateFromSocialBody, conn: Connection = Depends(conn_dep)):
+    if not body.social_url or not body.social_url.strip():
+        raise HTTPException(status_code=400, detail="social_url est obligatoire.")
+
+    kind = _detect_social_kind(body.social_url)
+    if not kind:
+        raise HTTPException(status_code=400, detail="URL social non supportée (YouTube/TikTok/Instagram uniquement).")
+
+    cols = _get_columns(conn)
+    today = date.today()
+
+    # defaults identiques à create_event()
+    nbStories_default = 0
+    nbAlreadyPublished_default = 0
+    active_default = 0
+    currentNbParticipants_default = 1
+    maxNumberParticipant_default = 10000000
+    isFull_default = False
+    validated_default = False
+
+    # social list JSON (même format que review page)
+    social_json = _dump_social_list([SocialVideo(url=body.social_url.strip(), approved=None)])
+
+    # quelle colonne social ?
+    social_col = f"{kind}_video"  # youtube_video | tiktok_video | insta_video
+    stored_field = social_col
+
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                insert_cols = [
+                    "creatorWinker_id",
+                    "titre",
+                    "titre_fr",
+                    "dateEvent",
+                    "datePublication",
+                    "adresse",
+                    "city",
+                    "region",
+                    "subregion",
+                    "pays",
+                    "codePostal",
+                    "bioEvent",
+                    "lon",
+                    "lat",
+                ]
+                values = [
+                    body.creator_winker_id,
+                    body.titre or "",
+                    body.titre_fr,
+                    body.date_event,
+                    today,
+                    body.adresse,
+                    body.city,
+                    body.region,
+                    body.subregion,
+                    body.pays or "France",
+                    body.code_postal,
+                    body.bio_event,
+                    body.lon,
+                    body.lat,
+                ]
+
+                def add_if_exists(c: str, v: Any):
+                    nonlocal insert_cols, values
+                    if _col_exists(cols, c):
+                        insert_cols.append(c)
+                        values.append(v)
+
+                add_if_exists("currentNbParticipants", currentNbParticipants_default)
+                add_if_exists("maxNumberParticipant", maxNumberParticipant_default)
+                add_if_exists("isFull", isFull_default)
+                add_if_exists("active", active_default)
+                add_if_exists("nbAlreadyPublished", nbAlreadyPublished_default)
+                add_if_exists("nbStories", nbStories_default)
+                add_if_exists("validated_from_web", validated_default)
+
+                # socials + queries si les colonnes existent
+                add_if_exists(social_col, social_json)
+
+                if kind == "youtube":
+                    add_if_exists("youtube_query", body.youtube_query)
+                if kind == "tiktok":
+                    add_if_exists("tiktok_query", body.tiktok_query)
+                if kind == "insta":
+                    add_if_exists("insta_query", body.insta_query)
+
+                q = SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+                    Identifier(EVENT_TABLE),
+                    SQL(", ").join(Identifier(c) for c in insert_cols),
+                    SQL(", ").join(SQL("%s") for _ in insert_cols),
+                )
+                cur.execute(q, values)
+                event_id = cur.fetchone()[0]
+
+                # FilesEvent: on crée une row vide (image/video NULL)
+                q2 = SQL('INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id').format(
+                    Identifier(FILESEVENT_TABLE)
+                )
+                cur.execute(q2, (event_id, None, None))
+                files_event_id = cur.fetchone()[0]
+
+        return EventCreateFromSocialResponse(
+            event_id=event_id,
+            files_event_id=files_event_id,
+            social_kind=kind,
+            stored_field=stored_field,
+        )
+
+    except Exception as e:
+        logger.exception("Erreur création event from social (creator_winker_id=%s)", body.creator_winker_id)
+        raise HTTPException(status_code=500, detail=f"Erreur création event: {e}")
+
+
+# --- NEW: Create from social video URL (no upload) ---
+
+class EventCreateFromSocialBody(BaseModel):
+    creator_winker_id: int
+    social_url: str
+
+    # mêmes champs que CreateEventPage
+    titre: Optional[str] = None
+    titre_fr: Optional[str] = None
+    date_event: Optional[date] = None
+
+    adresse: Optional[str] = None
+    city: Optional[str] = None
+    code_postal: Optional[str] = None
+
+    pays: Optional[str] = "France"
+    region: Optional[str] = None
+    subregion: Optional[str] = None
+    lon: Optional[float] = None
+    lat: Optional[float] = None
+
+    bio_event: Optional[str] = None
+
+    # optionnels: si tu veux aussi stocker les query
+    youtube_query: Optional[str] = None
+    tiktok_query: Optional[str] = None
+    insta_query: Optional[str] = None
+
+
+class EventCreateFromSocialResponse(BaseModel):
+    event_id: int
+    files_event_id: int
+    social_kind: str  # youtube|tiktok|insta
+    stored_field: str  # youtube_video|tiktok_video|insta_video
+
+
+def _detect_social_kind(url: str) -> Optional[str]:
+    u = (url or "").lower()
+    if "youtu.be" in u or "youtube.com" in u:
+        return "youtube"
+    if "tiktok.com" in u:
+        return "tiktok"
+    if "instagram.com" in u:
+        return "insta"
+    return None
+
+
+@router.post("/from-social", response_model=EventCreateFromSocialResponse, status_code=status.HTTP_201_CREATED)
+def create_event_from_social(body: EventCreateFromSocialBody, conn: Connection = Depends(conn_dep)):
+    if not body.social_url or not body.social_url.strip():
+        raise HTTPException(status_code=400, detail="social_url est obligatoire.")
+
+    kind = _detect_social_kind(body.social_url)
+    if not kind:
+        raise HTTPException(status_code=400, detail="URL social non supportée (YouTube/TikTok/Instagram uniquement).")
+
+    cols = _get_columns(conn)
+    today = date.today()
+
+    # defaults identiques à create_event()
+    nbStories_default = 0
+    nbAlreadyPublished_default = 0
+    active_default = 0
+    currentNbParticipants_default = 1
+    maxNumberParticipant_default = 10000000
+    isFull_default = False
+    validated_default = False
+
+    # social list JSON (même format que review page)
+    social_json = _dump_social_list([SocialVideo(url=body.social_url.strip(), approved=None)])
+
+    # quelle colonne social ?
+    social_col = f"{kind}_video"  # youtube_video | tiktok_video | insta_video
+    stored_field = social_col
+
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                insert_cols = [
+                    "creatorWinker_id",
+                    "titre",
+                    "titre_fr",
+                    "dateEvent",
+                    "datePublication",
+                    "adresse",
+                    "city",
+                    "region",
+                    "subregion",
+                    "pays",
+                    "codePostal",
+                    "bioEvent",
+                    "lon",
+                    "lat",
+                ]
+                values = [
+                    body.creator_winker_id,
+                    body.titre or "",
+                    body.titre_fr,
+                    body.date_event,
+                    today,
+                    body.adresse,
+                    body.city,
+                    body.region,
+                    body.subregion,
+                    body.pays or "France",
+                    body.code_postal,
+                    body.bio_event,
+                    body.lon,
+                    body.lat,
+                ]
+
+                def add_if_exists(c: str, v: Any):
+                    nonlocal insert_cols, values
+                    if _col_exists(cols, c):
+                        insert_cols.append(c)
+                        values.append(v)
+
+                add_if_exists("currentNbParticipants", currentNbParticipants_default)
+                add_if_exists("maxNumberParticipant", maxNumberParticipant_default)
+                add_if_exists("isFull", isFull_default)
+                add_if_exists("active", active_default)
+                add_if_exists("nbAlreadyPublished", nbAlreadyPublished_default)
+                add_if_exists("nbStories", nbStories_default)
+                add_if_exists("validated_from_web", validated_default)
+
+                # socials + queries si les colonnes existent
+                add_if_exists(social_col, social_json)
+
+                if kind == "youtube":
+                    add_if_exists("youtube_query", body.youtube_query)
+                if kind == "tiktok":
+                    add_if_exists("tiktok_query", body.tiktok_query)
+                if kind == "insta":
+                    add_if_exists("insta_query", body.insta_query)
+
+                q = SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+                    Identifier(EVENT_TABLE),
+                    SQL(", ").join(Identifier(c) for c in insert_cols),
+                    SQL(", ").join(SQL("%s") for _ in insert_cols),
+                )
+                cur.execute(q, values)
+                event_id = cur.fetchone()[0]
+
+                # FilesEvent: on crée une row vide (image/video NULL)
+                q2 = SQL('INSERT INTO {} ("event_id","image","video") VALUES (%s,%s,%s) RETURNING id').format(
+                    Identifier(FILESEVENT_TABLE)
+                )
+                cur.execute(q2, (event_id, None, None))
+                files_event_id = cur.fetchone()[0]
+
+        return EventCreateFromSocialResponse(
+            event_id=event_id,
+            files_event_id=files_event_id,
+            social_kind=kind,
+            stored_field=stored_field,
+        )
+
+    except Exception as e:
+        logger.exception("Erreur création event from social (creator_winker_id=%s)", body.creator_winker_id)
+        raise HTTPException(status_code=500, detail=f"Erreur création event: {e}")
