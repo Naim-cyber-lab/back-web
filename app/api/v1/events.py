@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.sql import SQL, Identifier
 
 from app.core.db import get_conn
+from app.api.utils import *
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -1206,3 +1207,29 @@ def create_event_from_social(body: EventCreateFromSocialBody, conn: Connection =
     except Exception as e:
         logger.exception("Erreur création event from social (creator_winker_id=%s)", body.creator_winker_id)
         raise HTTPException(status_code=500, detail=f"Erreur création event: {e}")
+
+
+@router.get("/prefill_from_url_video")
+async def preview_from_social(
+    url: str = Query(..., description="URL YouTube ou TikTok"),
+    headless: bool = Query(True, description="Playwright headless"),
+):
+    u = (url or "").strip()
+    if not u:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    if is_youtube(u):
+        try:
+            data = await preview_youtube(u, headless=headless)
+            return JSONResponse(content=data)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"YouTube preview error: {str(e)}")
+
+    if is_tiktok(u):
+        try:
+            data = await preview_tiktok(u, headless=headless)
+            return JSONResponse(content=data)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"TikTok preview error: {str(e)}")
+
+    raise HTTPException(status_code=400, detail="Unsupported URL. Only YouTube or TikTok are supported.")
