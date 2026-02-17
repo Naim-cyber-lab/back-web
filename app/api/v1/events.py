@@ -662,7 +662,7 @@ def list_events(
 # -------------------------
 # Read - single
 # -------------------------
-@router.get("/{event_id}", response_model=EventPublic)
+@router.get("/{event_id:int}", response_model=EventPublic)
 def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
@@ -723,7 +723,7 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
 # -------------------------
 # Patch - update fields + socials list
 # -------------------------
-@router.patch("/{event_id}", response_model=EventPublic)
+@router.patch("/{event_id:int}", response_model=EventPublic)
 def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
@@ -828,13 +828,13 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 DJANGO_BASE_URL = "https://api.nisu.fr"  # ou depuis env
 
 def _trigger_download_social_videos(event_id: int) -> dict:
-    url = f"{DJANGO_BASE_URL}/profil/downloadSocialVideos/{event_id}/"
+    url = f"{DJANGO_BASE_URL}/profil/downloadSocialVideos/{event_id:int}/"
     r = requests.post(url, json={}, timeout=180)  # ytdlp peut être long
     r.raise_for_status()
     return r.json()
 
 
-@router.post("/{event_id}/confirm", response_model=EventPublic)
+@router.post("/{event_id:int}/confirm", response_model=EventPublic)
 def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(conn_dep)):
     cols = _get_columns(conn)
 
@@ -875,7 +875,7 @@ def confirm_event(event_id: int, body: ConfirmBody, conn: Connection = Depends(c
 
 
 # ✅ Endpoint de sauvegarde (DB only) : pas de validation, pas de download, pas d'effet de bord.
-@router.post("/{event_id}/save", response_model=EventPublic)
+@router.post("/{event_id:int}/save", response_model=EventPublic)
 def save_event(event_id: int, patch: EventPatch, conn: Connection = Depends(conn_dep)):
     # On réutilise exactement la logique du PATCH (mise à jour DB)
     # => ça n'active PAS validated_from_web
