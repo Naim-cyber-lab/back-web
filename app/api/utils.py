@@ -46,46 +46,33 @@ from geopy.extra.rate_limiter import RateLimiter
 
 
 # -------------------- yt-dlp: title + description + thumbnails --------------------
-def fetch_youtube_metadata(url: str) -> Dict[str, Any]:
+def fetch_youtube_metadata(url: str):
     ydl_opts = {
         "quiet": True,
+        "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["web", "ios"]}},
-        # "cookiesfrombrowser": ("chrome",),
+
+        # ✅ clé : ne récupère pas les formats -> évite pas mal d'erreurs
+        "extract_flat": True,
+
+        # optionnel mais utile
+        "nocheckcertificate": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    thumbs_raw = info.get("thumbnails") or []
-    thumbnails: List[Dict[str, Any]] = []
-    for t in thumbs_raw:
-        if not isinstance(t, dict):
-            continue
-        url_t = t.get("url")
-        if not url_t:
-            continue
-        thumbnails.append(
-            {
-                "id": t.get("id"),
-                "url": url_t,
-                "width": t.get("width"),
-                "height": t.get("height"),
-                "preference": t.get("preference"),
-            }
-        )
-
+    # extract_flat renvoie parfois moins de champs => fallback safe
     return {
         "title": info.get("title"),
-        "description": info.get("description") or "",
-        "uploader": info.get("uploader"),
+        "description": info.get("description") or info.get("fulltitle") or "",
+        "uploader": info.get("uploader") or info.get("channel"),
         "channel": info.get("channel"),
-        "webpage_url": info.get("webpage_url"),
+        "webpage_url": info.get("webpage_url") or url,
         "thumbnail": info.get("thumbnail"),
-        "thumbnails": thumbnails,
+        "thumbnails": info.get("thumbnails") or [],
     }
-
 
 # -------------------- location extraction (FR heuristic) --------------------
 def extract_fr_location(text: str) -> Optional[Dict[str, Optional[str]]]:
