@@ -1,28 +1,38 @@
 """
-FastAPI endpoint: /api/v1/events/from-social/preview
+FastAPI endpoint: /api/v1/events/prefill_from_url_video
 
-- Detecte la plateforme (YouTube / TikTok)
-- Appelle les fonctions adaptées
-- Retourne un JSON "preview" standardisé utilisable côté front
+- Détecte la plateforme (YouTube / TikTok)
+- Fait un "preview" best-effort
+- NE DOIT PAS 502 pour des blocages YouTube/TikTok (anti-bot / challenge)
+  => renvoie quand même un JSON avec des champs + meta_error si besoin
 
-⚠️ Prérequis:
+Prérequis:
 - playwright installé + navigateurs: `playwright install`
-- yt_dlp installé
+- yt_dlp installé (optionnel: utilisé en best-effort)
 - geopy installé
 """
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Dict, List, Optional, Union
+import time
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+import yt_dlp
+from playwright.async_api import async_playwright
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+
+router = APIRouter(prefix="/events", tags=["events"])
 
 # =============================================================================
 # PLATFORM DETECTION
 # =============================================================================
+
 
 def is_youtube(url: str) -> bool:
     return bool(re.search(r"(youtu\.be|youtube\.com)", url or "", re.IGNORECASE))
@@ -33,37 +43,35 @@ def is_tiktok(url: str) -> bool:
 
 
 # =============================================================================
-# IMPORT YOUR EXISTING FUNCTIONS
-# (I paste them as-is / minimal edits for type hints compatibility)
+# YOUTUBE HELPERS
 # =============================================================================
 
-import json
-import yt_dlp
-from playwright.async_api import async_playwright
 
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
+def shorts_to_watch(url: str) -> str:
+    """Convertit /shorts/<id> -> watch?v=<id> (plus stable pour comments + og tags)."""
+    m = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", url or "")
+    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
 
 
-# -------------------- yt-dlp: title + description + thumbnails --------------------
-def fetch_youtube_metadata(url: str):
+def fetch_youtube_metadata_yt_dlp(url: str) -> Dict[str, Any]:
+    """
+    Best-effort via yt-dlp. Peut échouer à cause des challenges YouTube.
+    On NE DOIT PAS laisser remonter l'exception au endpoint.
+    """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-
-        # ✅ clé : ne récupère pas les formats -> évite pas mal d'erreurs
+        # IMPORTANT: on ne veut pas télécharger/choisir des formats (souvent source d'erreurs)
+        # extract_flat peut réduire les champs -> on garde "safe"
         "extract_flat": True,
-
-        # optionnel mais utile
         "nocheckcertificate": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    # extract_flat renvoie parfois moins de champs => fallback safe
     return {
         "title": info.get("title"),
         "description": info.get("description") or info.get("fulltitle") or "",
@@ -74,7 +82,104 @@ def fetch_youtube_metadata(url: str):
         "thumbnails": info.get("thumbnails") or [],
     }
 
-# -------------------- location extraction (FR heuristic) --------------------
+
+async def fetch_youtube_og_tags(url: str, headless: bool = True) -> Dict[str, Any]:
+    """
+    Fallback robuste: og:title / og:description / og:image via Playwright.
+    Ça marche souvent même quand yt-dlp se fait challenger.
+    """
+    watch = shorts_to_watch(url)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(locale="fr-FR")
+        page = await context.new_page()
+
+        await page.goto(watch, wait_until="domcontentloaded")
+
+        # consent best-effort
+        for label in ["Tout accepter", "J'accepte", "Accept all", "I agree", "Agree"]:
+            btn = page.get_by_role("button", name=re.compile(label, re.IGNORECASE))
+            if await btn.count() > 0:
+                try:
+                    await btn.first.click(timeout=2000)
+                    break
+                except Exception:
+                    pass
+
+        # lire les OG tags
+        og_title = await page.locator('meta[property="og:title"]').get_attribute("content")
+        og_desc = await page.locator('meta[property="og:description"]').get_attribute("content")
+        og_image = await page.locator('meta[property="og:image"]').get_attribute("content")
+
+        await browser.close()
+
+    return {
+        "title": og_title,
+        "description": og_desc or "",
+        "thumbnail": og_image,
+        "thumbnails": [{"url": og_image}] if og_image else [],
+        "webpage_url": watch,
+    }
+
+
+async def fetch_first_comment_youtube(url: str, headless: bool = True) -> Optional[str]:
+    """
+    Best-effort: récupère le 1er commentaire visible.
+    Peut retourner None (normal) si YouTube bloque / comments désactivés.
+    """
+    watch = shorts_to_watch(url)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(locale="fr-FR")
+        page = await context.new_page()
+
+        await page.goto(watch, wait_until="domcontentloaded")
+
+        # consent best-effort
+        for label in ["Tout accepter", "J'accepte", "Accept all", "I agree", "Agree"]:
+            btn = page.get_by_role("button", name=re.compile(label, re.IGNORECASE))
+            if await btn.count() > 0:
+                try:
+                    await btn.first.click(timeout=2500)
+                    break
+                except Exception:
+                    pass
+
+        # scroller pour charger les commentaires
+        for _ in range(12):
+            await page.mouse.wheel(0, 1200)
+            await page.wait_for_timeout(350)
+            if await page.locator("ytd-comment-thread-renderer #content-text").count() > 0:
+                break
+
+        # parfois un popup gêne
+        close_btn = page.locator('button[aria-label*="Fermer" i], button[aria-label*="Close" i]')
+        if await close_btn.count() > 0:
+            try:
+                await close_btn.first.click(timeout=1200)
+            except Exception:
+                pass
+
+        try:
+            await page.wait_for_selector("ytd-comment-thread-renderer #content-text", timeout=6000)
+        except Exception:
+            await browser.close()
+            return None
+
+        first = page.locator("ytd-comment-thread-renderer #content-text").first
+        txt = (await first.inner_text()).strip()
+
+        await browser.close()
+        return txt or None
+
+
+# =============================================================================
+# LOCATION / PRICE / RATING
+# =============================================================================
+
+
 def extract_fr_location(text: str) -> Optional[Dict[str, Optional[str]]]:
     if not text:
         return None
@@ -129,7 +234,6 @@ def extract_fr_location(text: str) -> Optional[Dict[str, Optional[str]]]:
     return {"address": addr, "postal_code": cp, "city": city}
 
 
-# -------------------- price extraction (mentions + best estimate) --------------------
 def extract_price_info(text: str) -> Dict[str, Any]:
     if not text:
         return {"mentions": [], "best": None}
@@ -240,7 +344,6 @@ def extract_price_info(text: str) -> Dict[str, Any]:
     return {"mentions": uniq, "best": best}
 
 
-# -------------------- rating extraction (mentions + best) --------------------
 def extract_rating_info(text: str) -> Dict[str, Any]:
     if not text:
         return {"mentions": [], "best": None}
@@ -274,59 +377,10 @@ def extract_rating_info(text: str) -> Dict[str, Any]:
     return {"mentions": uniq, "best": best}
 
 
-# -------------------- helper: shorts -> watch URL --------------------
-def shorts_to_watch(url: str) -> str:
-    m = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", url)
-    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
+# =============================================================================
+# GEOCODING (cached)
+# =============================================================================
 
-
-# -------------------- Playwright: first visible comment (YouTube) --------------------
-async def fetch_first_comment_youtube(url: str, headless: bool = True) -> Optional[str]:
-    url = shorts_to_watch(url)
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(locale="fr-FR")
-        page = await context.new_page()
-
-        await page.goto(url, wait_until="domcontentloaded")
-
-        for label in ["Tout accepter", "J'accepte", "Accept all", "I agree", "Agree"]:
-            btn = page.get_by_role("button", name=re.compile(label, re.IGNORECASE))
-            if await btn.count() > 0:
-                try:
-                    await btn.first.click(timeout=2500)
-                    break
-                except Exception:
-                    pass
-
-        for _ in range(12):
-            await page.mouse.wheel(0, 1200)
-            await page.wait_for_timeout(400)
-            if await page.locator("ytd-comment-thread-renderer #content-text").count() > 0:
-                break
-
-        close_btn = page.locator('button[aria-label*="Fermer" i], button[aria-label*="Close" i]')
-        if await close_btn.count() > 0:
-            try:
-                await close_btn.first.click(timeout=1200)
-            except Exception:
-                pass
-
-        try:
-            await page.wait_for_selector("ytd-comment-thread-renderer #content-text", timeout=8000)
-        except Exception:
-            await browser.close()
-            return None
-
-        first = page.locator("ytd-comment-thread-renderer #content-text").first
-        txt = (await first.inner_text()).strip()
-
-        await browser.close()
-        return txt or None
-
-
-# -------------------- Geocoding: lat/lon + région + pays --------------------
 _geolocator = Nominatim(user_agent="social-location-extractor")
 _geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1.0, swallow_exceptions=True)
 _geocode_cache: Dict[str, Dict[str, Any]] = {}
@@ -369,7 +423,11 @@ def geocode_location(loc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {**loc, **enriched}
 
 
-# -------------------- TikTok helpers --------------------
+# =============================================================================
+# TIKTOK HELPERS
+# =============================================================================
+
+
 def _safe_json_loads(s: str) -> Optional[dict]:
     try:
         return json.loads(s)
@@ -378,7 +436,7 @@ def _safe_json_loads(s: str) -> Optional[dict]:
 
 
 def _find_in_obj(obj: Any, key: str) -> List[Any]:
-    out = []
+    out: List[Any] = []
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k == key:
@@ -399,6 +457,7 @@ async def fetch_tiktok_metadata(url: str, headless: bool = True) -> Dict[str, An
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(1500)
 
+        # consent best-effort
         for label in ["Tout accepter", "Accepter", "Accept all", "I agree", "Agree"]:
             btn = page.get_by_role("button", name=re.compile(label, re.IGNORECASE))
             if await btn.count() > 0:
@@ -440,9 +499,8 @@ async def fetch_tiktok_metadata(url: str, headless: bool = True) -> Dict[str, An
 
             acands = _find_in_obj(blob, "uniqueId") + _find_in_obj(blob, "nickname")
             for a in acands:
-                if isinstance(a, str) and 2 <= len(a.strip()) <= 40:
-                    if author is None:
-                        author = a.strip()
+                if isinstance(a, str) and 2 <= len(a.strip()) <= 40 and author is None:
+                    author = a.strip()
 
             url_fields: List[Any] = []
             for key in ["cover", "dynamicCover", "originCover", "poster", "thumbnail", "avatarThumb"]:
@@ -463,7 +521,8 @@ async def fetch_tiktok_metadata(url: str, headless: bool = True) -> Dict[str, An
             for u in url_fields:
                 add_thumb(u)
 
-        norm_thumbs = []
+        # dedupe
+        norm_thumbs: List[Dict[str, Any]] = []
         seen = set()
         for t in thumbnails:
             u = t.get("url")
@@ -473,7 +532,6 @@ async def fetch_tiktok_metadata(url: str, headless: bool = True) -> Dict[str, An
             norm_thumbs.append({"url": u})
 
         thumbnail = og_image or (norm_thumbs[0]["url"] if norm_thumbs else None)
-
         title = caption or og_title or None
         description = caption or og_desc or ""
 
@@ -498,6 +556,7 @@ async def fetch_first_comment_tiktok(url: str, headless: bool = True) -> Optiona
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
 
+        # consent best-effort
         for label in ["Tout accepter", "Accepter", "Accept all", "I agree", "Agree"]:
             btn = page.get_by_role("button", name=re.compile(label, re.IGNORECASE))
             if await btn.count() > 0:
@@ -535,14 +594,40 @@ async def fetch_first_comment_tiktok(url: str, headless: bool = True) -> Optiona
 
 
 # =============================================================================
-# ORCHESTRATION
+# ORCHESTRATION (best-effort, never raises for external blockers)
 # =============================================================================
 
-async def preview_youtube(url: str, headless: bool) -> Dict[str, Any]:
-    meta = fetch_youtube_metadata(url)
-    first_comment = await fetch_first_comment_youtube(url, headless=headless)
 
-    desc_text = meta.get("description") or ""
+async def preview_youtube(url: str, headless: bool) -> Dict[str, Any]:
+    started = time.time()
+    meta_error: Optional[str] = None
+
+    # 1) try yt-dlp (best effort)
+    meta: Dict[str, Any] = {}
+    try:
+        meta = fetch_youtube_metadata_yt_dlp(url)
+    except Exception as e:
+        meta_error = f"yt-dlp failed: {type(e).__name__}: {e}"
+        meta = {}
+
+    # 2) fallback og tags if needed
+    if not meta.get("title") and not meta.get("description") and not meta.get("thumbnail"):
+        try:
+            og = await fetch_youtube_og_tags(url, headless=headless)
+            # merge og into meta (without destroying existing)
+            meta = {**og, **meta}
+        except Exception as e:
+            # keep going anyway
+            meta_error = (meta_error + " | " if meta_error else "") + f"og-tags failed: {type(e).__name__}: {e}"
+
+    # 3) comments (best effort)
+    first_comment = None
+    try:
+        first_comment = await fetch_first_comment_youtube(url, headless=headless)
+    except Exception as e:
+        meta_error = (meta_error + " | " if meta_error else "") + f"comments failed: {type(e).__name__}: {e}"
+
+    desc_text = (meta.get("description") or "") if isinstance(meta, dict) else ""
     comment_text = first_comment or ""
 
     loc_from_desc = extract_fr_location(desc_text)
@@ -563,7 +648,7 @@ async def preview_youtube(url: str, headless: bool) -> Dict[str, Any]:
 
         "uploader": meta.get("uploader"),
         "channel": meta.get("channel"),
-        "webpage_url": meta.get("webpage_url"),
+        "webpage_url": meta.get("webpage_url") or url,
 
         "first_comment": first_comment,
 
@@ -577,14 +662,31 @@ async def preview_youtube(url: str, headless: bool) -> Dict[str, Any]:
 
         "rating_from_description": extract_rating_info(desc_text),
         "rating_from_first_comment": extract_rating_info(comment_text),
+
+        # diagnostics non bloquants
+        "meta_error": meta_error,
+        "elapsed_ms": int((time.time() - started) * 1000),
     }
 
 
 async def preview_tiktok(url: str, headless: bool) -> Dict[str, Any]:
-    meta = await fetch_tiktok_metadata(url, headless=headless)
-    first_comment = await fetch_first_comment_tiktok(url, headless=headless)
+    started = time.time()
+    meta_error: Optional[str] = None
 
-    desc_text = meta.get("description") or ""
+    meta: Dict[str, Any] = {}
+    try:
+        meta = await fetch_tiktok_metadata(url, headless=headless)
+    except Exception as e:
+        meta_error = f"tiktok meta failed: {type(e).__name__}: {e}"
+        meta = {}
+
+    first_comment = None
+    try:
+        first_comment = await fetch_first_comment_tiktok(url, headless=headless)
+    except Exception as e:
+        meta_error = (meta_error + " | " if meta_error else "") + f"tiktok comments failed: {type(e).__name__}: {e}"
+
+    desc_text = (meta.get("description") or "") if isinstance(meta, dict) else ""
     comment_text = first_comment or ""
 
     loc_from_desc = extract_fr_location(desc_text)
@@ -603,7 +705,7 @@ async def preview_tiktok(url: str, headless: bool) -> Dict[str, Any]:
         "thumbnails": meta.get("thumbnails") or [],
 
         "uploader": meta.get("uploader"),
-        "webpage_url": meta.get("webpage_url"),
+        "webpage_url": meta.get("webpage_url") or url,
 
         "first_comment": first_comment,
 
@@ -617,7 +719,33 @@ async def preview_tiktok(url: str, headless: bool) -> Dict[str, Any]:
 
         "rating_from_description": extract_rating_info(desc_text),
         "rating_from_first_comment": extract_rating_info(comment_text),
+
+        # diagnostics non bloquants
+        "meta_error": meta_error,
+        "elapsed_ms": int((time.time() - started) * 1000),
     }
 
 
+# =============================================================================
+# ENDPOINT (NEVER 502 for upstream blockers; only 400 for unsupported)
+# =============================================================================
 
+
+@router.get("/prefill_from_url_video")
+async def preview_from_social(
+    url: str = Query(..., description="URL YouTube ou TikTok"),
+    headless: bool = Query(True, description="Playwright headless"),
+):
+    u = (url or "").strip()
+    if not u:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    if is_youtube(u):
+        data = await preview_youtube(u, headless=headless)
+        return JSONResponse(content=data)
+
+    if is_tiktok(u):
+        data = await preview_tiktok(u, headless=headless)
+        return JSONResponse(content=data)
+
+    raise HTTPException(status_code=400, detail="Unsupported URL. Only YouTube or TikTok are supported.")
