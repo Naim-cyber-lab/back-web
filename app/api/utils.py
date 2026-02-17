@@ -179,6 +179,41 @@ async def fetch_first_comment_youtube(url: str, headless: bool = True) -> Option
 # LOCATION / PRICE / RATING
 # =============================================================================
 
+def _infer_city_from_postal_code(cp: Optional[str]) -> Optional[str]:
+    if not cp or not re.fullmatch(r"\d{5}", cp):
+        return None
+    if cp.startswith("75"):
+        return "Paris"
+    # (optionnel) autres villes
+    if cp.startswith("69"):
+        return "Lyon"
+    if cp.startswith("13"):
+        return "Marseille"
+    return None
+
+
+def _infer_city_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    t = text.lower()
+
+    # hashtags
+    for city in ["paris", "lyon", "marseille"]:
+        if f"#{city}" in t:
+            return city.capitalize()
+
+    # "à Paris" / "a Paris"
+    m = re.search(r"\b(?:à|a|sur|dans)\s+(paris|lyon|marseille)\b", t)
+    if m:
+        return m.group(1).capitalize()
+
+    # simple présence du mot
+    for city in ["paris", "lyon", "marseille"]:
+        if re.search(rf"\b{city}\b", t):
+            return city.capitalize()
+
+    return None
+
 
 def extract_fr_location(text: str) -> Optional[Dict[str, Optional[str]]]:
     if not text:
@@ -200,6 +235,10 @@ def extract_fr_location(text: str) -> Optional[Dict[str, Optional[str]]]:
         mcity = re.match(r"(?P<city>[A-Za-zÀ-ÿ'\- ]{2,60})", after)
         if mcity:
             city = re.split(r"[,\n|/]", mcity.group("city").strip())[0].strip()
+
+    # ✅ fallback si city introuvable après CP (cas: "..., 75009")
+    if not city:
+        city = _infer_city_from_text(text) or _infer_city_from_postal_code(cp)
 
     addr_re = re.compile(
         r"""
@@ -411,13 +450,32 @@ def geocode_location(loc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     region = address.get("state") or address.get("region") or address.get("county")
     country = address.get("country")
 
+    # ✅ city depuis Nominatim si manquante
+    city_geo = None
+    for k in ["city", "town", "village", "municipality", "hamlet"]:
+        if address.get(k):
+            city_geo = address[k]
+            break
+
+    # fallback via display_name (utile pour "Paris 9e Arrondissement")
+    if not city_geo and isinstance(raw.get("display_name"), str):
+        m = re.search(r"\b(Paris|Lyon|Marseille)\b", raw["display_name"])
+        if m:
+            city_geo = m.group(1)
+
     enriched = {
         "latitude": float(result.latitude),
         "longitude": float(result.longitude),
         "region": region,
         "country": country,
         "display_name": raw.get("display_name"),
+
+        # ✅ on force city si loc.city est vide
+        "city": city or city_geo,
+        # ✅ on complète CP si manquant
+        "postal_code": cp or address.get("postcode"),
     }
+
 
     _geocode_cache[query] = enriched
     return {**loc, **enriched}
@@ -726,26 +784,4 @@ async def preview_tiktok(url: str, headless: bool) -> Dict[str, Any]:
     }
 
 
-# =============================================================================
-# ENDPOINT (NEVER 502 for upstream blockers; only 400 for unsupported)
-# =============================================================================
 
-
-@router.get("/prefill_from_url_video")
-async def preview_from_social(
-    url: str = Query(..., description="URL YouTube ou TikTok"),
-    headless: bool = Query(True, description="Playwright headless"),
-):
-    u = (url or "").strip()
-    if not u:
-        raise HTTPException(status_code=400, detail="url is required")
-
-    if is_youtube(u):
-        data = await preview_youtube(u, headless=headless)
-        return JSONResponse(content=data)
-
-    if is_tiktok(u):
-        data = await preview_tiktok(u, headless=headless)
-        return JSONResponse(content=data)
-
-    raise HTTPException(status_code=400, detail="Unsupported URL. Only YouTube or TikTok are supported.")
