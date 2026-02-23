@@ -309,7 +309,7 @@ def extract_price_info(text: str) -> Dict[str, Any]:
         re.IGNORECASE | re.VERBOSE,
     )
     euro_scale_re = re.compile(r"(?<!\w)(€{1,4})(?!\w)")
-
+    mentions = []
     for rx in [less_re, upto_re, from_re, between_re, range_re, single_re, euro_scale_re]:
         for m in rx.finditer(t):
             mentions.append(m.group(0).strip())
