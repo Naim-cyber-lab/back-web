@@ -1127,7 +1127,7 @@ def create_event_from_social(body: EventCreateFromSocialBody, conn: Connection =
                 add_if_exists("active", active_default)
                 add_if_exists("nbAlreadyPublished", nbAlreadyPublished_default)
                 add_if_exists("nbStories", nbStories_default)
-                add_if_exists("validated_from_web", validated_default)
+                add_if_exists("validated_from_web", True)
 
                 # socials + queries si les colonnes existent
                 add_if_exists(social_col, social_json)
