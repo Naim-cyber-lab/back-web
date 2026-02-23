@@ -944,7 +944,7 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 DJANGO_BASE_URL = "https://api.nisu.fr"  # ou depuis env
 
 def _trigger_download_social_videos(event_id: int) -> dict:
-    url = f"{DJANGO_BASE_URL}/profil/downloadSocialVideos/{event_id:int}/"
+    url = f"{DJANGO_BASE_URL}/profil/downloadSocialVideos/{event_id}/"
     r = requests.post(url, json={}, timeout=180)  # ytdlp peut être long
     r.raise_for_status()
     return r.json()
