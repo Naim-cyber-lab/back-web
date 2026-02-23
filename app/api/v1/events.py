@@ -1359,3 +1359,36 @@ async def preview_from_social(
             raise HTTPException(status_code=502, detail=f"TikTok preview error: {str(e)}")
 
     raise HTTPException(status_code=400, detail="Unsupported URL. Only YouTube or TikTok are supported.")
+
+
+
+@router.delete("/{event_id:int}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_event(event_id: int, conn: Connection = Depends(conn_dep)):
+    """
+    DELETE /events/{event_id}/
+    Supprime l'event et ses FilesEvent associés en cascade.
+    """
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                ("DELETE FROM profil_netflixcategories WHERE event_id = %s"),
+                (event_id,)
+            )
+            # Supprime les fichiers liés
+            cur.execute(
+                ("DELETE FROM profil_filesevent WHERE event_id = %s"),
+                (event_id,)
+            )
+            # Supprime l'event
+            cur.execute(
+                ("DELETE FROM profil_event WHERE id = %s RETURNING id"),
+                (event_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Event {event_id} introuvable.")
+
+    logger.info("Event %s supprimé.", event_id)
+
+
+
