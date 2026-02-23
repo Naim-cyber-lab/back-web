@@ -1,3 +1,4 @@
+# app/routers/events.py
 from __future__ import annotations
 import requests
 import json
@@ -1028,6 +1029,9 @@ class EventCreateFromSocialBody(BaseModel):
     tiktok_query: Optional[str] = None
     insta_query: Optional[str] = None
 
+    # Categories Netflix — envoyees par le front
+    categories: Optional[Dict[str, bool]] = None
+
 
 class EventCreateFromSocialResponse(BaseModel):
     event_id: int
@@ -1150,6 +1154,10 @@ def create_event_from_social(body: EventCreateFromSocialBody, conn: Connection =
                 cur.execute(q2, (event_id, None, None))
                 files_event_id = cur.fetchone()[0]
 
+        # Upsert des categories si envoyees par le front
+        if body.categories is not None:
+            _upsert_categories(conn, event_id, body.categories)
+
         return EventCreateFromSocialResponse(
             event_id=event_id,
             files_event_id=files_event_id,
@@ -1189,6 +1197,9 @@ class EventCreateFromSocialBody(BaseModel):
     youtube_query: Optional[str] = None
     tiktok_query: Optional[str] = None
     insta_query: Optional[str] = None
+
+    # Categories Netflix — envoyees par le front
+    categories: Optional[Dict[str, bool]] = None
 
 
 class EventCreateFromSocialResponse(BaseModel):
