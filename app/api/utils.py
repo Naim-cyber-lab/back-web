@@ -281,8 +281,6 @@ def extract_price_info(text: str) -> Dict[str, Any]:
     for d in ["–", "—", "−", "‐", "‒"]:
         t = t.replace(d, "-")
 
-    mentions: List[str] = []
-
     def to_float(s: str) -> float:
         return float(s.replace(",", "."))
 

@@ -1,4 +1,3 @@
-# app/routers/events.py
 from __future__ import annotations
 import requests
 import json
@@ -37,6 +36,8 @@ EVENT_DEBUG = os.getenv("EVENT_DEBUG", "0") in {"1", "true", "TRUE", "yes", "YES
 # Tables Django
 EVENT_TABLE = os.getenv("DJANGO_EVENT_TABLE", "profil_event")
 FILESEVENT_TABLE = os.getenv("DJANGO_FILESEVENT_TABLE", "profil_filesevent")
+
+NETFLIXCATEGORIES_TABLE = os.getenv("DJANGO_NETFLIXCATEGORIES_TABLE", "profil_netflixcategories")
 
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/app/media")
 EVENT_UPLOAD_DIR = os.getenv("EVENT_UPLOAD_DIR", "events")
@@ -293,6 +294,10 @@ class EventPublic(BaseModel):
     image: Optional[str] = None
     video: Optional[str] = None
 
+    # Catégories Netflix (profil_netflixcategories)
+    # Clés: party, decouverte, nourriture, sport, chill, culture, enfants, potes
+    categories: Optional[Dict[str, bool]] = None
+
 
 class EventListResponse(BaseModel):
     items: list[EventPublic]
@@ -325,6 +330,9 @@ class EventPatch(BaseModel):
     insta_query: Optional[str] = None
 
     price: Optional[str] = None
+
+    # Catégories Netflix (profil_netflixcategories)
+    categories: Optional[Dict[str, bool]] = None
 
 
 class ConfirmBody(BaseModel):
@@ -384,6 +392,96 @@ def _confirmed_expr(cols: set[str]) -> SQL:
     return SQL("FALSE")
 
 
+# -------------------------
+# Netflix categories helpers
+# -------------------------
+NETFLIX_CAT_COLS = ["party", "decouverte", "nourriture", "sport", "chill", "culture", "enfants", "potes"]
+
+
+def _get_categories(conn: Connection, event_id: int) -> Optional[Dict[str, bool]]:
+    """Lit la row profil_netflixcategories pour un event_id donné."""
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                SQL("SELECT {} FROM {} WHERE event_id = %s LIMIT 1").format(
+                    SQL(", ").join(Identifier(c) for c in NETFLIX_CAT_COLS),
+                    Identifier(NETFLIXCATEGORIES_TABLE),
+                ),
+                (event_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {c: bool(row.get(c) or False) for c in NETFLIX_CAT_COLS}
+    except Exception as e:
+        logger.warning("_get_categories failed event_id=%s: %s", event_id, e)
+        return None
+
+
+def _get_categories_bulk(conn: Connection, event_ids: List[int]) -> Dict[int, Dict[str, bool]]:
+    """Charge les catégories pour une liste d'event_ids en une seule requête."""
+    if not event_ids:
+        return {}
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                SQL("SELECT event_id, {} FROM {} WHERE event_id = ANY(%s)").format(
+                    SQL(", ").join(Identifier(c) for c in NETFLIX_CAT_COLS),
+                    Identifier(NETFLIXCATEGORIES_TABLE),
+                ),
+                (event_ids,),
+            )
+            rows = cur.fetchall()
+            return {
+                int(r["event_id"]): {c: bool(r.get(c) or False) for c in NETFLIX_CAT_COLS}
+                for r in rows
+            }
+    except Exception as e:
+        logger.warning("_get_categories_bulk failed: %s", e)
+        return {}
+
+
+def _upsert_categories(conn: Connection, event_id: int, cats: Dict[str, bool]) -> None:
+    """
+    Upsert de la row profil_netflixcategories pour un event.
+    IMPORTANT: utilise with conn.transaction() pour garantir le commit.
+    """
+    valid = {c: bool(cats.get(c, False)) for c in NETFLIX_CAT_COLS}
+    print(f"[CATEGORIES] upsert event_id={event_id} valid={valid}", flush=True)
+
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                SQL("SELECT id FROM {} WHERE event_id = %s LIMIT 1").format(
+                    Identifier(NETFLIXCATEGORIES_TABLE)
+                ),
+                (event_id,),
+            )
+            existing = cur.fetchone()
+
+            if existing:
+                sets_sql = SQL(", ").join(
+                    SQL("{} = %s").format(Identifier(c)) for c in NETFLIX_CAT_COLS
+                )
+                cur.execute(
+                    SQL("UPDATE {} SET {} WHERE event_id = %s").format(
+                        Identifier(NETFLIXCATEGORIES_TABLE), sets_sql
+                    ),
+                    [valid[c] for c in NETFLIX_CAT_COLS] + [event_id],
+                )
+                print(f"[CATEGORIES] UPDATE rowcount={cur.rowcount}", flush=True)
+            else:
+                cols_sql = SQL(", ").join(Identifier(c) for c in ["event_id"] + NETFLIX_CAT_COLS)
+                vals_sql = SQL(", ").join(SQL("%s") for _ in range(len(NETFLIX_CAT_COLS) + 1))
+                cur.execute(
+                    SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        Identifier(NETFLIXCATEGORIES_TABLE), cols_sql, vals_sql
+                    ),
+                    [event_id] + [valid[c] for c in NETFLIX_CAT_COLS],
+                )
+                print(f"[CATEGORIES] INSERT rowcount={cur.rowcount}", flush=True)
+
+
 def _row_to_event(r: Dict[str, Any]) -> EventPublic:
     event_id = r.get("id")
 
@@ -428,6 +526,8 @@ def _row_to_event(r: Dict[str, Any]) -> EventPublic:
         confirmed=bool(r.get("confirmed") or False),
         image=r.get("image"),
         video=r.get("video"),
+        # categories: peut être pré-chargé dans la row ou None (chargé séparément)
+        categories=r.get("_categories"),
     )
 
 
@@ -655,6 +755,12 @@ def list_events(
                 logger.debug("Skipping event_id=%r due to conversion error", r.get("id"))
             continue
 
+    # Charger les catégories en une seule requête bulk
+    event_ids = [item.id for item in items]
+    cats_by_id = _get_categories_bulk(conn, event_ids)
+    for item in items:
+        item.categories = cats_by_id.get(item.id)
+
     return EventListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -717,7 +823,9 @@ def get_event(event_id: int, conn: Connection = Depends(conn_dep)):
     if not r:
         raise HTTPException(status_code=404, detail="Event introuvable")
 
-    return _row_to_event(r)
+    event = _row_to_event(r)
+    event.categories = _get_categories(conn, event_id)
+    return event
 
 
 # -------------------------
@@ -786,7 +894,10 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
         values.append(value)
 
     if not sets:
-        print("[PATCH] sets empty -> get_event()", flush=True)
+        print("[PATCH] sets empty", flush=True)
+        # Si seulement les catégories sont à mettre à jour
+        if patch.categories is not None:
+            _upsert_categories(conn, event_id, patch.categories)
         return get_event(event_id, conn)
 
     q = (
@@ -818,6 +929,10 @@ def patch_event(event_id: int, patch: EventPatch, conn: Connection = Depends(con
 
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Event introuvable (aucune ligne mise à jour)")
+
+    # Upsert des catégories si présentes dans le patch
+    if patch.categories is not None:
+        _upsert_categories(conn, event_id, patch.categories)
 
     return get_event(event_id, conn)
 
