@@ -125,6 +125,28 @@ def _log_if_float_was_sanitized(event_id: Any, field: str, raw: Any, cleaned: Op
         )
 
 
+
+class GoogleReviewsItem(BaseModel):
+    id: int
+    titre: Optional[str] = None
+    city: Optional[str] = None
+    region: Optional[str] = None
+    urlGoogleMapsAvis: Optional[str] = None
+    has_reviews: bool = False          # google_reviews est rempli (non vide)
+
+
+class GoogleReviewsListResponse(BaseModel):
+    items: list[GoogleReviewsItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class UpdateGoogleUrlBody(BaseModel):
+    urlGoogleMapsAvis: str
+
+
+
 # -------------------------
 # Social list (JSON in TextField)
 # -------------------------
@@ -1390,5 +1412,120 @@ def delete_event(event_id: int, conn: Connection = Depends(conn_dep)):
 
     logger.info("Event %s supprimé.", event_id)
 
+
+
+@router.get("/google-reviews-urls", response_model=GoogleReviewsListResponse)
+def list_google_reviews_urls(
+    limit: int = 50,
+    offset: int = 0,
+    q: Optional[str] = None,
+    filter: Optional[str] = None,   # "missing_url" | "missing_reviews" | "done"
+    conn: Connection = Depends(conn_dep),
+):
+    """
+    Liste les events pour la page de gestion des URLs Google.
+
+    Filtres :
+      - filter=missing_url      → urlGoogleMapsAvis vide
+      - filter=missing_reviews  → urlGoogleMapsAvis remplie mais google_reviews vide
+      - filter=done             → google_reviews rempli
+      - (aucun)                 → tous les events
+    """
+    where_parts: list[SQL] = [SQL("TRUE")]
+    params: list[Any] = []
+
+    if q and q.strip():
+        where_parts.append(SQL("(titre ILIKE %s OR city ILIKE %s)"))
+        like = f"%{q.strip()}%"
+        params.extend([like, like])
+
+    if filter == "missing_url":
+        where_parts.append(SQL(
+            '("urlGoogleMapsAvis" IS NULL OR "urlGoogleMapsAvis" = \'\')'
+        ))
+    elif filter == "missing_reviews":
+        where_parts.append(SQL(
+            '"urlGoogleMapsAvis" IS NOT NULL AND "urlGoogleMapsAvis" <> \'\''
+            ' AND (google_reviews IS NULL OR google_reviews::text = \'[]\' OR google_reviews::text = \'\')'
+        ))
+    elif filter == "done":
+        where_parts.append(SQL(
+            'google_reviews IS NOT NULL AND google_reviews::text <> \'[]\' AND google_reviews::text <> \'\''
+        ))
+
+    where = SQL(" AND ").join(where_parts)
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            SQL("SELECT COUNT(*) AS n FROM {} WHERE ").format(Identifier(EVENT_TABLE)) + where,
+            params,
+        )
+        total = int(cur.fetchone()["n"])
+
+        cur.execute(
+            SQL("""
+                SELECT
+                    id,
+                    titre,
+                    city,
+                    region,
+                    "urlGoogleMapsAvis",
+                    CASE
+                        WHEN google_reviews IS NOT NULL
+                         AND google_reviews::text <> '[]'
+                         AND google_reviews::text <> ''
+                        THEN true
+                        ELSE false
+                    END AS has_reviews
+                FROM {}
+                WHERE
+            """).format(Identifier(EVENT_TABLE))
+            + where
+            + SQL(" ORDER BY id DESC LIMIT %s OFFSET %s"),
+            params + [limit, offset],
+        )
+        rows = cur.fetchall()
+
+    return GoogleReviewsListResponse(
+        items=[GoogleReviewsItem(**r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.patch("/google-reviews-urls/{event_id:int}", response_model=GoogleReviewsItem)
+def update_google_reviews_url(
+    event_id: int,
+    body: UpdateGoogleUrlBody,
+    conn: Connection = Depends(conn_dep),
+):
+    """
+    Met à jour uniquement urlGoogleMapsAvis pour un event.
+    Route dédiée, plus légère que le PATCH général.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            SQL("""
+                UPDATE {} SET "urlGoogleMapsAvis" = %s
+                WHERE id = %s
+                RETURNING
+                    id, titre, city, region, "urlGoogleMapsAvis",
+                    CASE
+                        WHEN google_reviews IS NOT NULL
+                         AND google_reviews::text <> '[]'
+                         AND google_reviews::text <> ''
+                        THEN true ELSE false
+                    END AS has_reviews
+            """).format(Identifier(EVENT_TABLE)),
+            (body.urlGoogleMapsAvis, event_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Event introuvable")
+        conn.commit()
+
+    return GoogleReviewsItem(**row)
 
 
