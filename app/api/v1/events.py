@@ -1419,7 +1419,7 @@ def list_google_reviews_urls(
     limit: int = 50,
     offset: int = 0,
     q: Optional[str] = None,
-    filter: Optional[str] = None,   # "missing_url" | "missing_reviews" | "done"
+    filter: Optional[str] = None,
     conn: Connection = Depends(conn_dep),
 ):
     """
@@ -1429,6 +1429,7 @@ def list_google_reviews_urls(
       - filter=missing_url      → urlGoogleMapsAvis vide
       - filter=missing_reviews  → urlGoogleMapsAvis remplie mais google_reviews vide
       - filter=done             → google_reviews rempli
+      - filter=no_stick         → URL présente mais sans stick= (à corriger)
       - (aucun)                 → tous les events
     """
     where_parts: list[SQL] = [SQL("TRUE")]
@@ -1451,6 +1452,11 @@ def list_google_reviews_urls(
     elif filter == "done":
         where_parts.append(SQL(
             'google_reviews IS NOT NULL AND google_reviews::text <> \'[]\' AND google_reviews::text <> \'\''
+        ))
+    elif filter == "no_stick":
+        where_parts.append(SQL(
+            '"urlGoogleMapsAvis" IS NOT NULL AND "urlGoogleMapsAvis" <> \'\''
+            ' AND "urlGoogleMapsAvis" NOT LIKE \'%stick=%\''
         ))
 
     where = SQL(" AND ").join(where_parts)
@@ -1481,7 +1487,7 @@ def list_google_reviews_urls(
                 WHERE
             """).format(Identifier(EVENT_TABLE))
             + where
-            + SQL(" ORDER BY id DESC LIMIT %s OFFSET %s"),
+            + SQL(" ORDER BY id ASC LIMIT %s OFFSET %s"),
             params + [limit, offset],
         )
         rows = cur.fetchall()
@@ -1522,7 +1528,6 @@ def update_google_reviews_url(
         )
         row = cur.fetchone()
         if not row:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Event introuvable")
         conn.commit()
 
