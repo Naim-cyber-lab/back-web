@@ -1454,10 +1454,13 @@ def list_google_reviews_urls(
             'google_reviews IS NOT NULL AND google_reviews::text <> \'[]\' AND google_reviews::text <> \'\''
         ))
     elif filter == "no_stick":
+        # ✅ Le pattern LIKE est passé en paramètre %s pour éviter que psycopg3
+        #    n'interprète le % littéral comme un placeholder.
         where_parts.append(SQL(
             '"urlGoogleMapsAvis" IS NOT NULL AND "urlGoogleMapsAvis" <> \'\''
-            ' AND "urlGoogleMapsAvis" NOT LIKE \'%stick=%\''
+            ' AND "urlGoogleMapsAvis" NOT LIKE %s'
         ))
+        params.append("%stick=%")
 
     where = SQL(" AND ").join(where_parts)
 
